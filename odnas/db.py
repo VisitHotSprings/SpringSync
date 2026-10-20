@@ -221,6 +221,15 @@ MIGRATIONS: list[str] = [
     ALTER TABLE sync_profiles ADD COLUMN safety_accept_state_at TEXT;
     ALTER TABLE sync_profiles ADD COLUMN restore_timeouts INTEGER NOT NULL DEFAULT 0;
     """,
+    # 4: SPEC v0.4 (Reid's answers 2026-10-20). Expand-only.
+    #    Per-side approved delete counts (rclone applies --max-delete per side), the one-time automatic
+    #    re-queue of a timed-out next-slot Restore as a tonight run, and a separate mount-failure counter.
+    """
+    ALTER TABLE sync_profiles ADD COLUMN safety_approved_del_p1 INTEGER;
+    ALTER TABLE sync_profiles ADD COLUMN safety_approved_del_p2 INTEGER;
+    ALTER TABLE sync_profiles ADD COLUMN safety_restore_requeued INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE sync_profiles ADD COLUMN consecutive_mount_failures INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 SECRET_DETAIL_KEYS = {"password", "secret", "token", "refresh_token", "access_token", "smtp_password",

@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.4.0 (unreleased, lab build, 2026-10-20). Follows SPEC.md v0.4 (Reid's answers to the v0.3 questions)
+### Changed
+- **Restore run-time limits:**
+  - A **next-slot** Restore keeps the normal 25-minute limit. If it hits it (`timeout`), it is
+    **re-queued once as a tonight run**: no new admin approval (resync only copies, never deletes), audit
+    `safety_restore_requeued_tonight` (with the original approver), medium alert `restore_requeued`. The
+    admin page flags it.
+  - A **tonight** Restore (admin's choice or the re-queue) may run until `resync_hours` closes
+    (07:00 CT, DST-aware; e.g. 11 h from 20:00, 14 h on the DST-end night). If it is still running then,
+    the worker stops it, the user stays in `safety_abort`, the admin gets a `restore_failed` alert and
+    audit `safety_restore_window_closed`; a new Restore click is needed. A re-click resets the one-time
+    re-queue.
+  - A Restore that fails for any other reason is not re-queued.
+- **Per-side delete counts:** Path1 (OneDrive) and Path2 (NAS) are counted, shown, approved and checked
+  separately.
+  - The Safety-abort record keeps a `per_side` map of every side's `too many deletes` line.
+  - The admin approves both numbers (`approved_deletes_path1/2`); a stale page on either side gets 409.
+  - The pre-`--force` recount must match **each** side. A change on one side alone, or the same total split
+    differently, cancels the run and voids the approval.
+  - Audit details carry `approved_deletes_path1/2`, `deletes_path1/2`, `deletes_now_path1/2`.
+- **Mount failures** (NAS unreachable or mount error, rclone never started):
+  - skipped by the `critical_retryable` same-error chain (neither counted nor reset);
+  - no longer counted as a "retryable failure in a row";
+  - tracked in `consecutive_mount_failures`, `nas_unreachable` alert after 2 in a row, no lockout;
+  - any run where rclone starts resets the counter and closes the alert;
+  - one-shot Restore / Accept-deletes approvals are not used up, and no Restore/Accept failure is recorded.
+- **Run history order:** the Accept-deletes recount (`delta`) row is created first; the `force` row is only
+  created once the recount matches, so ids are chronological and a cancelled run has no `force` row.
+- **SPEC v0.4 §5 names:** `RESULTS` gains the `cancelled` constant (`R_CANCELLED`); `KINDS` now in spec
+  order. A test compares `users.state`, `sync_runs.result` and `sync_runs.kind` against the SPEC.md text,
+  plus a frozen copy for when SPEC.md is absent.
+- Version 0.4.0 (User-Agent `…|SpringSync/0.4`).
+
+### Added
+- Migration 4 (expand-only): `safety_approved_del_p1`, `safety_approved_del_p2`, `safety_restore_requeued`,
+  `consecutive_mount_failures`. (`safety_approved_deletes` is kept as the total for older readers.)
+- Integration finding (real rclone v1.75.2): when **both** sides exceed `--max-delete`, rclone logs the
+  Safety abort for **Path1 only** (it stops at the first side). The per-side approval numbers come from the
+  `--dry-run --force` delta list, which counts both. New integration test.
+- Tests: 222 total (55 smoke, 9 integration against real rclone v1.75.2).
+
 ## 0.3.0 (unreleased, lab build, 2026-10-20). Follows SPEC.md v0.3 (§9.4, §9.4.1, §14.13)
 ### Changed
 - **`critical_retryable` escalation:** the user is still retried at the next slot. The tool **escalates to

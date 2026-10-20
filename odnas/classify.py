@@ -19,8 +19,10 @@ from odnas.tokens import log_auth_classification
 
 R_OK, R_RETRY, R_CRITICAL, R_AUTH, R_NAS_AUTH, R_ERROR, R_TIMEOUT = (
     "ok", "retryable", "critical", "auth", "nas_auth", "error", "timeout")
-R_SAFETY, R_CRIT_RETRY, R_USAGE = "safety_abort", "critical_retryable", "usage"
-RESULTS = (R_OK, R_RETRY, R_CRITICAL, R_AUTH, R_NAS_AUTH, R_ERROR, R_TIMEOUT, R_SAFETY, R_CRIT_RETRY, R_USAGE)
+R_SAFETY, R_CRIT_RETRY, R_USAGE, R_CANCELLED = "safety_abort", "critical_retryable", "usage", "cancelled"
+# sync_runs.result values: exactly SPEC v0.4 §5 (a test compares against the spec text)
+RESULTS = (R_OK, R_RETRY, R_CRITICAL, R_CRIT_RETRY, R_SAFETY, R_USAGE, R_TIMEOUT, R_CANCELLED, R_AUTH, R_NAS_AUTH,
+           R_ERROR)
 
 # --- exact v1.75.2 strings (SPEC §9.4 table) ---------------------------------
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -97,12 +99,17 @@ class SafetyAbort:
     pct: int | None = None
     deletes: int | None = None
     total: int | None = None
+    # SPEC v0.4: one entry per side that logged a Safety-abort line, {"Path1": {"deletes", "total", "pct"}}.
+    # Note (verified on v1.75.2): rclone stops at the FIRST side that trips, so usually only one side is
+    # logged even when both exceed the limit; the delta dry-run gives the real per-side counts.
+    per_side: dict = field(default_factory=dict)
 
     def summary(self) -> str:
-        where = SIDE_LABEL.get(self.side, self.side)
         if self.check == "max_delete":
-            return f"too many deletes on {where} ({self.deletes} of {self.total}, limit {self.pct}%)"
-        return f"all files were changed on {where}"
+            parts = [f"{SIDE_LABEL.get(k, k)} {v['deletes']} of {v['total']}" for k, v in sorted(self.per_side.items())] \
+                or [f"{SIDE_LABEL.get(self.side, self.side)} {self.deletes} of {self.total}"]
+            return f"too many deletes ({'; '.join(parts)}; limit {self.pct}%)"
+        return f"all files were changed on {SIDE_LABEL.get(self.side, self.side)}"
 
     def as_dict(self) -> dict:
         return dict(self.__dict__)
@@ -154,6 +161,7 @@ def iter_log(text: str):
 
 
 def find_safety_abort(entries: list[LogEntry]) -> SafetyAbort | None:
+    first: SafetyAbort | None = None
     for e in entries:
         msg = e.msg
         if e.obj != SAFETY_OBJECT and msg.startswith(TEXT_SAFETY_PREFIX + "too many deletes"):
@@ -163,11 +171,15 @@ def find_safety_abort(entries: list[LogEntry]) -> SafetyAbort | None:
             obj = e.obj
         m = MAX_DELETE_RE.match(msg)
         if m and obj == SAFETY_OBJECT:
-            return SafetyAbort("max_delete", m.group(4), m.group(5), int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            pct, n, tot, side = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4)
+            if first is None or first.check != "max_delete":
+                first = SafetyAbort("max_delete", side, m.group(5), pct, n, tot)
+            first.per_side[side] = {"deletes": n, "total": tot, "pct": pct}
+            continue
         m = ALL_CHANGED_RE.match(e.msg)
-        if m:
-            return SafetyAbort("all_files_changed", m.group(1), m.group(2))
-    return None
+        if m and first is None:
+            first = SafetyAbort("all_files_changed", m.group(1), m.group(2))
+    return first
 
 
 def parse_deltas(text: str, limit: int = 2000) -> dict:

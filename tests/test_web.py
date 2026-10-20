@@ -245,7 +245,7 @@ def _safety_user(db, kr, cfg, delta=True):
         safety_delta_requested=0 if delta else 1)
     if delta:
         db.update_profile(uid, safety_delta_at=D.iso(D.utcnow()), safety_delta_summary="NAS: 4 deleted")
-        write_private(delta_file(cfg, uid), _j.dumps({"counts": {"Path1": {}, "Path2": {"deleted": 1}}, "truncated": False, "items": [
+        write_private(delta_file(cfg, uid), _j.dumps({"counts": {"Path1": {"deleted": 3}, "Path2": {"deleted": 1}}, "truncated": False, "items": [
             {"side": "Path2", "where": "NAS", "event": "deleted", "name": "Payroll/SECRET-NAME.xlsx"}]}))
     return uid
 
@@ -274,23 +274,46 @@ def test_safety_restore_requires_delta_then_approves_and_audits(app, entra, db, 
                      data={"csrf": tok, "confirm": "victim@hotsprings.org"}).status_code == 409
 
 
-def test_safety_accept_deletes_requires_upn_and_current_count(app, entra, db, kr, cfg):
+def test_safety_accept_deletes_requires_upn_and_current_per_side_counts(app, entra, db, kr, cfg):
     mark = login(app, entra, oid="m", upn="mark@hotsprings.org", groups=(G_ADMINS,))
     uid = _safety_user(db, kr, cfg)
     tok = csrf(mark, "/admin")
     url = f"/admin/users/{uid}/safety-accept-deletes"
-    assert mark.post(url, data={"csrf": tok, "confirm": "x", "approved_deletes": "1"}).status_code == 400
+    ok = {"csrf": tok, "confirm": "victim@hotsprings.org", "approved_deletes_path1": "3", "approved_deletes_path2": "1"}
+    assert mark.post(url, data={**ok, "confirm": "x"}).status_code == 400
     assert mark.post(url, data={"csrf": tok, "confirm": "victim@hotsprings.org"}).status_code == 400
-    # stale page: the admin saw a different count than the current delta list
-    assert mark.post(url, data={"csrf": tok, "confirm": "victim@hotsprings.org", "approved_deletes": "7"}).status_code == 409
+    # a stale page on EITHER side alone is refused (SPEC v0.4: per-side counts)
+    assert mark.post(url, data={**ok, "approved_deletes_path1": "2"}).status_code == 409
+    assert mark.post(url, data={**ok, "approved_deletes_path2": "2"}).status_code == 409
+    # the old single total is not accepted any more
+    assert mark.post(url, data={"csrf": tok, "confirm": "victim@hotsprings.org", "approved_deletes": "4"}).status_code == 400
     assert db.user_full(uid)["safety_action"] is None
-    assert mark.post(url, data={"csrf": tok, "confirm": "victim@hotsprings.org", "approved_deletes": "1"}).status_code == 303
+    assert mark.post(url, data=ok).status_code == 303
     u = db.user_full(uid)
-    assert (u["safety_action"], u["safety_approved_deletes"], u["safety_accept_state"]) == (D.SAFETY_ACCEPT, 1, "pending")
+    assert (u["safety_action"], u["safety_approved_del_p1"], u["safety_approved_del_p2"], u["safety_accept_state"]) \
+        == (D.SAFETY_ACCEPT, 3, 1, "pending")
     det = __import__("json").loads(db.audit_rows(action="admin_safety_accept_deletes")[0]["details_json"])
-    assert det["approved_deletes"] == 1 and det["expires_at"]
+    assert (det["approved_deletes_path1"], det["approved_deletes_path2"]) == (3, 1) and det["expires_at"]
     page = mark.get(f"/admin/users/{uid}").text
-    assert "expires" in page and "Accept 1 deletes approved by m" in page
+    assert "expires" in page and "Accept deletes (Path1 3, Path2 1) approved by m" in page
+
+
+def test_admin_page_shows_both_sides_delete_counts(app, entra, db, kr, cfg):
+    mark = login(app, entra, oid="m", upn="mark@hotsprings.org", groups=(G_ADMINS,))
+    uid = _safety_user(db, kr, cfg)
+    page = mark.get(f"/admin/users/{uid}").text
+    assert "Path1 (OneDrive): 3" in page and "Path2 (NAS): 1" in page
+    assert 'name="approved_deletes_path1" value="3"' in page and 'name="approved_deletes_path2" value="1"' in page
+    lst = mark.get(f"/admin/users/{uid}/safety-delta").text
+    assert "Path1 (OneDrive): 3" in lst and "Path2 (NAS): 1" in lst
+
+
+def test_admin_page_flags_auto_requeued_restore(app, entra, db, kr, cfg):
+    mark = login(app, entra, oid="m", upn="mark@hotsprings.org", groups=(G_ADMINS,))
+    uid = _safety_user(db, kr, cfg)
+    db.update_profile(uid, safety_action=D.SAFETY_RESTORE, safety_action_by="m", safety_action_at=D.iso(D.utcnow()),
+                      safety_restore_when=D.RESTORE_TONIGHT, safety_restore_requeued=1)
+    assert "automatically re-queued for tonight" in mark.get(f"/admin/users/{uid}").text
 
 
 def test_safety_restore_next_slot_or_tonight(app, entra, db, kr, cfg):

@@ -100,35 +100,41 @@ Also not covered by local tests:
 - ~~Restore / Accept-deletes semantics~~: Accept deletes has a 24 h expiry, a pre-run recount, the normal
   run-time limit, no automatic re-run, and full audit.
 
-### Still open or ambiguous (v0.3)
+### Resolved by SPEC v0.4 (closed)
+- ~~Restore and the run-time limit~~: next slot 25 min, then one automatic re-queue as tonight; tonight runs
+  until 07:00 CT; still running then → stopped, paused, alert.
+- ~~What a "delete count" is~~: per side (Path1 / Path2), from the dry-run's `File was deleted` deltas.
+- ~~What breaks a "consecutive" chain~~: mount failures are skipped; counted separately (alert after 2).
+- ~~Run ordering~~: fixed (recount row before force row).
+- ~~SPEC §5 value lists~~: aligned, and checked by a test.
+
+### Still open or ambiguous (v0.4)
 1. **§14.13: may IT admins see file names in the Accept-deletes list?** Walter has to sign off. **This
    stays OPEN and is going to Mark via Gidget.** Until then:
    - the list has its own page that only IT admins can open;
    - Auditors and Users get 403;
    - every view is audited (who, when, which user's list, entry count);
    - the DB, issues, audit log and auditor views carry counts only.
-2. **Restore and the run-time limit.** §9.4.1 says Restore "uses the normal run-time limit" (25 min), even
-   for **Run tonight**, which exists for big drives. A large Restore will therefore time out.
-   - What v0.3 does: on a timeout the user stays paused, an alert opens, and the admin clicks Restore again.
-     Progress is kept because resync is additive. Nothing re-runs automatically, in line with "only an admin
-     starts a resync".
-   - **Question:** should a Restore continue automatically after a timeout, or should Run tonight have no
-     limit or a longer one?
-3. **What a "delete count" is.** It is the number of `File was deleted` deltas, on both sides, in the dry
-   run. Each detected deletion becomes exactly one delete on the other side. Confirm, versus rclone's stats
-   `deletes` or the `Queue delete` lines.
-4. **What breaks a "consecutive" chain.** Any other result breaks it, including a NAS-unreachable attempt
-   where rclone never ran. Confirm whether a mount failure should break the chain or be skipped.
-5. **Run ordering.** The Accept-deletes pre-check is its own `sync_runs` row (kind `delta`). It is created
-   after the `force` row, so ids aren't in chronological order. Cosmetic.
+2. **"Parsed from the per-side `msg` lines" (§9.4) vs. real rclone.** v1.75.2 stops at the first side that
+   trips, so only one Safety-abort line appears even when both sides are over the limit (integration test).
+   The build shows the side(s) logged plus both counts from the delta dry-run, and approval uses the delta
+   counts. Suggest the spec says so.
+3. **Which runs reset the mount-failure counter.** The spec says "any run where rclone starts". A NAS
+   *logon* failure (`nas_auth`) neither counts nor resets it (it has its own state). An internal error
+   after the mount is treated as "rclone started" and resets it. Confirm.
+4. **Re-queued tonight Restore and concurrency.** It runs under the "one resync at a time" rule like any
+   tonight Restore (a next-slot Restore is exempt). With several users re-queued on the same night, each
+   later one starts only when the previous one finishes, with less of the window left (and may then be
+   stopped at 07:00). Fine for a 3-5 user pilot; confirm.
+5. **A tonight run started very close to 07:00** gets only the minutes left in the window. The scheduler
+   does not hold back a run that can't finish; it then counts as "still running at 07:00" (paused + alert).
+   Option: a minimum remaining time (e.g. 60 min) before starting a tonight run.
 6. **A safety abort during onboarding** can't happen in practice, because resync doesn't check max-delete.
    If it did, the user would leave `onboarding`. Not specified.
-7. **SPEC §5 value lists** (`users.state`, `sync_runs.result`/`kind`) still lack `safety_abort`,
-   `critical_retryable`, `usage`, `cancelled`, `delta` and `force`.
-8. **Lockout under `--resilient`** still isn't reproducible locally. The integration test drops
+7. **Lockout under `--resilient`** still isn't reproducible locally. The integration test drops
    `--resilient`. A T-B* lab test should capture a real one.
-9. **`caddy build-info` format** (used by the plugin-pin check) is untested until T-C1.
-10. **Worker hardening:** `NoNewPrivileges` is off because the worker needs sudo. A socket-activated helper
+8. **`caddy build-info` format** (used by the plugin-pin check) is untested until T-C1.
+9. **Worker hardening:** `NoNewPrivileges` is off because the worker needs sudo. A socket-activated helper
     would allow it.
-11. **The internal web→worker token** is HMAC-derived from the data key, not a separate secret.
-12. **Option B "mounted persistently"** is per-run idempotent mounts. A boot-time mount unit is not built.
+10. **The internal web→worker token** is HMAC-derived from the data key, not a separate secret.
+11. **Option B "mounted persistently"** is per-run idempotent mounts. A boot-time mount unit is not built.

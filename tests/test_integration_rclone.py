@@ -119,8 +119,8 @@ def test_safety_delta_list_then_accept_deletes(env):
     assert code == 0 and oc.result == R_OK
     d = parse_deltas(text)
     assert d["counts"]["Path2"] == {"deleted": 3}
-    from odnas.runner import delete_count
-    assert delete_count(d) == 3                          # the count an admin approves (SPEC v0.3 §9.4.1)
+    from odnas.runner import delete_count, delete_counts
+    assert delete_counts(d) == (0, 3) and delete_count(d) == 3   # per-side counts the admin approves (SPEC v0.4)
     assert sorted(i["name"] for i in d["items"]) == ["f0.txt", "f1.txt", "f2.txt"]
     assert (p1 / "f0.txt").exists()                      # dry run deleted nothing
     code, text, oc = run(c, p1, mnt, 4, force=True)      # one admin-approved Accept-deletes run
@@ -129,6 +129,26 @@ def test_safety_delta_list_then_accept_deletes(env):
     assert any(p.name.startswith("f0") for p in (p1 / c.archive_dirname).rglob("*"))   # kept in backup-dir1
     code, _, oc = run(c, p1, mnt, 5)                     # the next normal run is clean
     assert code == 0 and oc.result == R_OK
+
+
+def test_both_sides_over_limit_logs_first_side_only_delta_has_both(env):
+    """Verified behaviour of rclone v1.75.2: the per-side --max-delete check stops at the FIRST side that
+    trips, so the Safety-abort log names only Path1 even though Path2 is over the limit too. The admin's
+    per-side numbers therefore come from the --dry-run --force delta list, which counts both sides."""
+    c, p1, mnt = env
+    seed(c, p1, mnt)
+    assert run(c, p1, mnt, 1, resync=True)[0] == 0
+    for i in range(3):
+        (p1 / f"f{i}.txt").unlink()                      # 3 of 21 on OneDrive
+    for i in range(10, 14):
+        (mnt / "Files" / f"f{i}.txt").unlink()           # 4 of 21 on the NAS
+    code, text, oc = run(c, p1, mnt, 2)
+    assert code == 1 and oc.result == "safety_abort"
+    assert set(oc.safety.per_side) == {"Path1"} and oc.safety.per_side["Path1"]["deletes"] == 3
+    code, text, oc = run(c, p1, mnt, 3, dry_run=True, force=True)
+    assert code == 0 and oc.result == R_OK
+    from odnas.runner import delete_counts
+    assert delete_counts(parse_deltas(text)) == (3, 4)
 
 
 def test_safety_restore_via_resync(env):

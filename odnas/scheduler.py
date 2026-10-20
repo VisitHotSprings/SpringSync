@@ -37,6 +37,18 @@ def in_window(now: datetime, window: tuple[time, time] | None) -> bool:
     return start <= t < end if start < end else (t >= start or t < end)  # overnight window
 
 
+def seconds_until_window_end(now: datetime, window: tuple[time, time] | None) -> int | None:
+    """Seconds from `now` until the window closes (America/Chicago wall clock, DST-aware).
+    None if there is no window or `now` is outside it."""
+    if window is None or not in_window(now, window):
+        return None
+    local = now.astimezone(LOCAL_TZ)
+    end = datetime.combine(local.date(), window[1], tzinfo=LOCAL_TZ)
+    if end <= local:
+        end = datetime.combine(local.date() + timedelta(days=1), window[1], tzinfo=LOCAL_TZ)
+    return max(1, int((end.astimezone(now.tzinfo) - now).total_seconds()))
+
+
 def weekly_check_due(now: datetime, last_check: datetime | None, weekday: int, hhmm: str) -> bool:
     local = now.astimezone(LOCAL_TZ)
     if local.weekday() != weekday or local.time() < time.fromisoformat(hhmm):

@@ -31,7 +31,7 @@ from odnas.crypto import Keyring
 from odnas.db import pack, unpack
 from odnas.entra import EntraClient
 from odnas.nas import V_ERROR, friendly, local_name_from_upn
-from odnas.runner import delete_count, delta_file
+from odnas.runner import delete_count, delete_counts, delta_file
 from odnas.scheduler import LOCAL_TZ
 from odnas.status import credential_expiry, disk_free_pct, worker_alive
 
@@ -395,14 +395,18 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
              "delta_pending": bool(u["safety_delta_requested"]), "action": u["safety_action"],
              "action_by": u["safety_action_by"], "action_at": u["safety_action_at"],
              "restore_when": u["safety_restore_when"], "approved_deletes": u["safety_approved_deletes"],
+             "approved_p1": u["safety_approved_del_p1"], "approved_p2": u["safety_approved_del_p2"],
+             "requeued": bool(u["safety_restore_requeued"]),
+             "abort_sides": json.loads(u["safety_abort_json"] or "{}").get("per_side", {}),
              "accept_state": (D.ACCEPT_PENDING if u["safety_action"] == D.SAFETY_ACCEPT else u["safety_accept_state"]),
              "accept_state_at": u["safety_accept_state_at"], "restore_timeouts": u["restore_timeouts"],
              "expires_at": D.iso(at + timedelta(hours=D.ACCEPT_TTL_HOURS))
              if at and u["safety_action"] == D.SAFETY_ACCEPT else None,
-             "delete_count": None, "has_list": False}
+             "delete_count": None, "del_p1": None, "del_p2": None, "has_list": False}
         if with_delta and u["safety_delta_at"]:
             d = _delta_doc(u["id"])
             if d is not None:
+                v["del_p1"], v["del_p2"] = delete_counts(d)
                 v["delete_count"], v["has_list"] = delete_count(d), True
         return v
 
@@ -420,9 +424,10 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         db.audit(sess["oid"], "safety_delta_viewed", uid,
                  {"viewer_upn": sess["upn"], "user_upn": u["upn"], "entries": len(entries),
                   "delta_at": u["safety_delta_at"]})
+        p1, p2 = delete_counts(d)
         return render(request, "safety_delta.html", sess, u=u, entries=entries[:500],
                       truncated=bool(d.get("truncated")) or len(entries) > 500, summary=u["safety_delta_summary"],
-                      delete_count=delete_count(d))
+                      del_p1=p1, del_p2=p2)
 
     @adm.post("/users/{uid}/{action}")
     async def admin_user_action(uid: str, action: str, request: Request, sess: dict = Depends(admin_dep)):
@@ -473,7 +478,8 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
                 if when not in (D.RESTORE_NEXT_SLOT, D.RESTORE_TONIGHT):
                     raise HTTPException(400, "Choose 'next slot' or 'tonight'.")
                 db.update_profile(uid, safety_action=D.SAFETY_RESTORE, safety_action_by=actor, safety_action_at=now,
-                                  safety_restore_when=when, needs_resync=1, resync_approved_by=actor,
+                                  safety_restore_when=when, safety_restore_requeued=0, needs_resync=1,
+                                  resync_approved_by=actor,
                                   resync_approved_at=now, safety_accept_state=None, safety_accept_state_at=None)
                 details["when"] = when
             else:
@@ -482,17 +488,19 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
                 d = _delta_doc(uid)
                 if d is None:
                     raise HTTPException(409, "The dry-run delta list is missing; refresh it first.")
-                n = delete_count(d)
+                p1, p2 = delete_counts(d)
                 try:
-                    shown = int(str(form.get("approved_deletes", "")))
+                    shown = (int(str(form.get("approved_deletes_path1", ""))), int(str(form.get("approved_deletes_path2", ""))))
                 except ValueError:
-                    raise HTTPException(400, "Missing delete count.") from None
-                if shown != n:   # the page the admin looked at is stale
-                    raise HTTPException(409, f"The delete count changed ({shown} shown, {n} now). Reload and review.")
+                    raise HTTPException(400, "Missing per-side delete counts.") from None
+                if shown != (p1, p2):   # the page the admin looked at is stale
+                    raise HTTPException(409, f"The delete counts changed (shown Path1={shown[0]} Path2={shown[1]}, "
+                                             f"now Path1={p1} Path2={p2}). Reload and review.")
+                n = p1 + p2
                 db.update_profile(uid, safety_action=D.SAFETY_ACCEPT, safety_action_by=actor, safety_action_at=now,
-                                  safety_approved_deletes=n, safety_accept_state=D.ACCEPT_PENDING,
-                                  safety_accept_state_at=now)
-                details.update(approved_deletes=n, expires_at=D.iso(D.utcnow() + timedelta(hours=D.ACCEPT_TTL_HOURS)))
+                                  safety_approved_deletes=n, safety_approved_del_p1=p1, safety_approved_del_p2=p2,
+                                  safety_accept_state=D.ACCEPT_PENDING, safety_accept_state_at=now)
+                details.update(approved_deletes_path1=p1, approved_deletes_path2=p2, expires_at=D.iso(D.utcnow() + timedelta(hours=D.ACCEPT_TTL_HOURS)))
         elif action == "safety-refresh-delta":
             if u["safety_action"]:
                 raise HTTPException(409, f"Already approved: {u['safety_action']}.")

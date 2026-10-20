@@ -41,10 +41,11 @@ def actions(db):
     return [r["action"] for r in db.all("SELECT action FROM audit_log ORDER BY seq")]
 
 
-def approve_accept(db, uid, n, at=None):
+def approve_accept(db, uid, p1, p2, at=None):
     at = at or D.utcnow()
     db.update_profile(uid, safety_action=D.SAFETY_ACCEPT, safety_action_by="m", safety_action_at=D.iso(at),
-                      safety_approved_deletes=n, safety_accept_state=D.ACCEPT_PENDING)
+                      safety_approved_deletes=p1 + p2, safety_approved_del_p1=p1, safety_approved_del_p2=p2,
+                      safety_accept_state=D.ACCEPT_PENDING)
 
 
 def approve_restore(db, uid, when=D.RESTORE_NEXT_SLOT):
@@ -142,19 +143,18 @@ def test_next_slot_restores_obey_max_concurrent_only(cfg, db, kr, entra):
     assert [k for _, k in started] == ["resync", "resync"]    # cap 2; not limited to one resync at a time
 
 
-def test_restore_uses_run_limit_and_timeout_needs_new_click(cfg, db, kr, entra):
+def test_tonight_restore_timeout_needs_new_click(cfg, db, kr, entra):
     w, uid = _with_delta(cfg, db, kr, entra)
-    approve_restore(db, uid)
+    approve_restore(db, uid, D.RESTORE_TONIGHT)
     w.runner.proc = FakeProc(timed_out=True, exit_codes=[-2])
     assert w.runner.run(uid, "resync").result == "timeout"
-    assert w.runner.proc.calls[-1][1] == 25 * 60
     u = db.user_full(uid)
     assert u["state"] == D.SAFETY_ABORT and u["safety_action"] is None and not u["resync_approved_by"]
     assert u["restore_timeouts"] == 1 and not u["needs_resync"]
-    assert _choose(w, db, uid, NOON) is None
+    assert _choose(w, db, uid, EVENING) is None
     assert any(i["type"] == "restore_failed" for i in db.open_issues(uid))
     a = actions(db)
-    assert "safety_restore_started" in a and "safety_restore_timeout" in a
+    assert "safety_restore_started" in a and "safety_restore_window_closed" in a
 
 
 def test_restore_success_audited(cfg, db, kr, entra):
@@ -173,33 +173,34 @@ def test_restore_success_audited(cfg, db, kr, entra):
 
 def test_accept_deletes_prechecks_then_one_force_run(cfg, db, kr, entra):
     w, uid = _with_delta(cfg, db, kr, entra)                 # DELTA: 2 deletes on the NAS side
-    approve_accept(db, uid, 2, at=NOON - timedelta(hours=1))
+    approve_accept(db, uid, 0, 2, at=NOON - timedelta(hours=1))
     assert _choose(w, db, uid, NOON) == "force"
-    approve_accept(db, uid, 2)
+    approve_accept(db, uid, 0, 2)
     w.runner.proc = FakeProc(log_lines=DELTA)
     assert w.runner.run(uid, "force").result == "ok"
     (pre, pre_limit), (run, limit) = w.runner.proc.calls[-2:]
     assert "--dry-run" in pre and "--force" in pre and "--resync" not in pre
     assert "--force" in run and "--dry-run" not in run and "--resync" not in run
     assert limit == 25 * 60                                  # same run-time limit as a normal run
-    kinds = [r["kind"] for r in db.runs(uid)[:2]]
-    assert sorted(kinds) == ["delta", "force"]
+    two = db.runs(uid)[:2]                                   # newest first
+    assert [r["kind"] for r in two] == ["force", "delta"] and two[1]["id"] < two[0]["id"]   # recount row first
     u = db.user_full(uid)
     assert u["state"] == D.ACTIVE and not u["safety_action"] and u["safety_approved_deletes"] is None
     a = actions(db)
     for step in ("accept_deletes_precheck", "accept_deletes_started", "accept_deletes_completed"):
         assert step in a
     pre_audit = json.loads(db.audit_rows(action="accept_deletes_precheck")[0]["details_json"])
-    assert pre_audit["deletes"] == 2 and pre_audit["approved_deletes"] == 2
+    assert (pre_audit["deletes_path1"], pre_audit["deletes_path2"]) == (0, 2)
+    assert (pre_audit["approved_deletes_path1"], pre_audit["approved_deletes_path2"]) == (0, 2)
 
 
 def test_count_change_cancels_and_voids_approval(cfg, db, kr, entra):
     w, uid = _with_delta(cfg, db, kr, entra)
-    approve_accept(db, uid, 2)
+    approve_accept(db, uid, 0, 2)
     more = DELTA + [{"level": "notice", "msg": "- Path2             File was deleted                            - x.txt"}]
     w.runner.proc = FakeProc(log_lines=more)
     oc = w.runner.run(uid, "force")
-    assert oc.result == "cancelled" and "2 approved, 3 now" in oc.detail
+    assert oc.result == "cancelled" and "approved Path1=0 Path2=2, now Path1=0 Path2=3" in oc.detail
     assert len(w.runner.proc.calls) == 1 and "--dry-run" in w.runner.proc.calls[0][0]   # --force never ran
     u = db.user_full(uid)
     assert u["state"] == D.SAFETY_ABORT and u["safety_action"] is None and u["safety_approved_deletes"] is None
@@ -207,23 +208,25 @@ def test_count_change_cancels_and_voids_approval(cfg, db, kr, entra):
     assert "x.txt" in delta_file(cfg, uid).read_text()      # admin re-reviews the new list
     assert any(i["type"] == "accept_deletes_cancelled" for i in db.open_issues(uid))
     det = json.loads(db.audit_rows(action="accept_deletes_cancelled")[0]["details_json"])
-    assert (det["approved_deletes"], det["deletes_now"]) == (2, 3)
-    assert db.runs(uid)[1]["result"] == "cancelled" or db.runs(uid)[0]["result"] == "cancelled"
+    assert (det["approved_deletes_path2"], det["deletes_now_path2"]) == (2, 3)
+    runs = db.runs(uid)
+    assert runs[0]["kind"] == "delta" and runs[0]["result"] == "cancelled"
+    assert not any(r["kind"] == "force" for r in runs)          # --force never ran, so no force row
     assert _choose(w, db, uid, NOON) is None
 
 
 def test_approval_expires_after_24h(cfg, db, kr, entra):
     w, uid = _with_delta(cfg, db, kr, entra)
-    approve_accept(db, uid, 2, at=NOON - timedelta(hours=23, minutes=59))
+    approve_accept(db, uid, 0, 2, at=NOON - timedelta(hours=23, minutes=59))
     assert _choose(w, db, uid, NOON) == "force"
-    approve_accept(db, uid, 2, at=NOON - timedelta(hours=24))
+    approve_accept(db, uid, 0, 2, at=NOON - timedelta(hours=24))
     assert _choose(w, db, uid, NOON) is None
     w.tick(NOON)
     u = db.user_full(uid)
     assert u["safety_accept_state"] == D.ACCEPT_EXPIRED and u["safety_action"] is None
     assert "accept_deletes_expired" in actions(db)
     assert any(i["type"] == "accept_deletes_expired" for i in db.open_issues(uid))
-    approve_accept(db, uid, 2, at=D.utcnow() - timedelta(hours=25))
+    approve_accept(db, uid, 0, 2, at=D.utcnow() - timedelta(hours=25))
     import pytest
     with pytest.raises(RuntimeError):
         w.runner.run(uid, "force")
@@ -231,7 +234,7 @@ def test_approval_expires_after_24h(cfg, db, kr, entra):
 
 def test_force_timeout_stays_paused_and_never_reruns(cfg, db, kr, entra):
     w, uid = _with_delta(cfg, db, kr, entra)
-    approve_accept(db, uid, 2)
+    approve_accept(db, uid, 0, 2)
     w.runner.proc = ScriptProc([(0, DELTA, False), (-2, [], True)])   # pre-check ok, --force hits the limit
     assert w.runner.run(uid, "force").result == "timeout"
     u = db.user_full(uid)
@@ -248,7 +251,7 @@ def test_force_timeout_stays_paused_and_never_reruns(cfg, db, kr, entra):
 
 def test_force_failure_stays_paused(cfg, db, kr, entra):
     w, uid = _with_delta(cfg, db, kr, entra)
-    approve_accept(db, uid, 2)
+    approve_accept(db, uid, 0, 2)
     w.runner.proc = ScriptProc([(0, DELTA, False), (5, [], False)])
     assert w.runner.run(uid, "force").result == "retryable"
     u = db.user_full(uid)
@@ -258,7 +261,7 @@ def test_force_failure_stays_paused(cfg, db, kr, entra):
 
 def test_precheck_failure_cancels(cfg, db, kr, entra):
     w, uid = _with_delta(cfg, db, kr, entra)
-    approve_accept(db, uid, 2)
+    approve_accept(db, uid, 0, 2)
     w.runner.proc = FakeProc(exit_codes=[5])
     assert w.runner.run(uid, "force").result == "cancelled"
     assert len(w.runner.proc.calls) == 1

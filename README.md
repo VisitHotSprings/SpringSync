@@ -80,6 +80,10 @@ flowchart LR
 | exit 7 with neither line, or exit code and log text disagree | `critical` (fail safe, warning logged) |
 | exit 2 | `usage` (bug: user paused, high issue) |
 | exit 1, 3, 4, 5, 6, 8, 10, or killed by a signal | `retryable` |
+| NAS mount failed, rclone never started (SPEC v0.4) | `retryable`, but **outside** the same-error chain (neither counts nor resets it); separate counter, admin alert after 2 in a row, no lockout |
+
+Value names (`users.state`, `sync_runs.result`, `sync_runs.kind`) match SPEC v0.4 §5 exactly; a test
+compares the code's lists with the spec text.
 
 **User lifecycle:**
 - **Onboarding:** `onboarding` → Microsoft connect → NAS login verified → preflight filename scan →
@@ -95,14 +99,19 @@ flowchart LR
   would trip again every slot, so the user is paused.
   1. The worker runs a read-only `bisync --dry-run --force` to build a delta list. The list holds file names,
      so it is kept in a 0600 file and shown on the IT-admin page only.
-  2. The admin then chooses one of two actions, both audited, single use, with the normal run-time limit
-     (SPEC v0.3 §9.4.1):
-     - **Restore:** one `--resync --resync-mode newer` at the next slot, or with **Run tonight** in
-       `resync_hours`. It copies the deleted files back.
-     - **Accept deletes:** the admin approves the exact delete count and types the UPN to confirm.
+  2. The admin then chooses one of two actions, both audited and single use (SPEC v0.4 §9.4.1):
+     - **Restore:** one `--resync --resync-mode newer`. It copies the deleted files back.
+       - **Next slot** (default): normal 25-minute limit. If it hits the limit it is **re-queued once as a
+         tonight run** automatically (audited, admin notified, no new approval: resync never deletes).
+       - **Run tonight**: waits for `resync_hours` and may run until the window closes (07:00 CT). If it is
+         still running then, it is stopped, the user stays paused and the admin is alerted (click again).
+     - **Accept deletes:** the admin approves the delete count **for each side** (Path1 = OneDrive,
+       Path2 = NAS) and types the UPN to confirm. Normal run-time limit.
        - The approval expires after 24 h.
-       - Just before the run, a dry-run recounts the deletes. A different count cancels the run, voids the
-         approval and alerts the admin.
+       - Just before the run, a dry-run recounts the deletes. If **either side's** count differs, the run is
+         cancelled, the approval voided and the admin alerted. The recount is its own run row, before the
+         `force` row.
+       - A NAS mount failure before the run does not use up the approval.
        - If the `--force` run times out or fails, the user stays paused, and it never re-runs on its own.
   3. Success sets the user back to `active`.
   4. Walter sees the counts and decision state, but not the list or the buttons. The list has its own
@@ -163,7 +172,7 @@ sudo REPO_URL=git@github.com:<OWNER>/<REPO>.git TENANT_ID=... CLIENT_ID=... \
      GROUP_USERS=... GROUP_ADMINS=... GROUP_AUDITORS=... \
      SYNC_HOST=sync.hotsprings.org GCP_ACME_PROJECT=... ACME_ZONE=... \
      LAN_CIDRS="10.0.0.0/16" ADMIN_CIDR="10.0.10.0/24" LOG_READERS="walter" \
-     ./deploy/install.sh --version v0.3.0           # add --dry-run to see the plan first
+     ./deploy/install.sh --version v0.4.0           # add --dry-run to see the plan first
 ```
 `install.sh` is idempotent: every step checks state first, and it never overwrites keys, the DB, or settings.
 It handles:

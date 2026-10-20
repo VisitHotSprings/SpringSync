@@ -52,7 +52,8 @@ def test_safety_abort_pauses_user_and_queues_readonly_delta(cfg, db, kr, entra):
     u = db.user_full(uid)
     assert u["state"] == D.SAFETY_ABORT and u["last_result"] == "safety_abort"
     assert json.loads(u["safety_abort_json"]) == {"check": "max_delete", "side": "Path2", "path": "/srv/springsync/mnt/x/",
-                                                  "pct": 10, "deletes": 4, "total": 21}
+                                                  "pct": 10, "deletes": 4, "total": 21,
+                                                  "per_side": {"Path2": {"deletes": 4, "total": 21, "pct": 10}}}
     issue = next(i for i in db.open_issues(uid) if i["type"] == "safety_abort")
     assert issue["severity"] == "critical" and "4 of 21" in issue["summary"]
     assert db.runs(uid)[0]["result"] == "safety_abort"
@@ -128,7 +129,7 @@ def test_migration_2_is_expand_only(tmp_path):
     c.execute("INSERT INTO sync_runs(id,user_id,started_at,kind,result) VALUES (7,'u','t','bisync','ok')")
     c.close()
     db = D.DB(str(p))
-    assert db.schema_version() == len(D.MIGRATIONS) == 3
+    assert db.schema_version() == len(D.MIGRATIONS) == 4
     assert dict(db.one("SELECT id, kind, result FROM sync_runs")) == {"id": 7, "kind": "bisync", "result": "ok"}
     db.q("INSERT INTO sync_runs(user_id,started_at,kind) VALUES ('u','t','force')")
     with pytest.raises(Exception):
