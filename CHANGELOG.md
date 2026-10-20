@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.3.0 (unreleased, lab build, 2026-10-20). Follows SPEC.md v0.3 (§9.4, §9.4.1, §14.13)
+### Changed
+- **`critical_retryable` escalation:** the user is still retried at the next slot. The tool **escalates to
+  `critical`** (lockout: pause, critical alert, audit `critical_retryable_escalated`) in three cases:
+  - immediately, if the log has `Access test failed:` (likely a bad or empty mount);
+  - when the same normalised `Bisync critical error: <err>` (digits, whitespace and case normalised) repeats
+    on **2 consecutive runs**;
+  - on the 3rd retryable result in a row (upper bound).
+
+  Any other result breaks the chain. The worker never starts `--resync` by itself; a test runs repeated
+  ticks inside `resync_hours` and asserts this.
+- **Restore** (single use; normal run-time limit):
+  - The admin chooses **Next slot** (default) or **Run tonight**, which holds it for `resync_hours`.
+  - A next-slot Restore obeys `max_concurrent` but is not held by the "one initial resync at a time" rule.
+  - The approval is used up when the run starts. If the run times out or fails, the user stays paused and
+    gets a `restore_failed` alert; a new click is needed (progress is kept, because resync is additive).
+- **Accept deletes**:
+  - The admin approves the **exact delete count** shown. The server rejects a stale page (409).
+  - An unused approval **expires after 24 h** (worker tick, plus a guard in the runner), with an alert and
+    an audit entry.
+  - Immediately before `--force`, a `--dry-run --force` with the same flags recounts the deletes. A
+    mismatch, or a failed pre-check, **cancels** the run: `--force` never starts, the approval is void, the
+    new list is stored for review, and the admin gets an alert.
+  - The `--force` run has the **normal run-time limit**. On a timeout or failure the user stays in
+    `safety_abort`, the approval state becomes `timeout`/`failed`, the admin gets an alert, and it is
+    **never re-run automatically**.
+  - Audited at each step: `admin_safety_accept_deletes`, `accept_deletes_expired`,
+    `accept_deletes_precheck`, `accept_deletes_cancelled`, `accept_deletes_started`,
+    `accept_deletes_timeout` / `accept_deletes_failed` / `accept_deletes_completed`.
+  - Restore is audited as `admin_safety_restore` (with when), `safety_restore_started` and
+    `safety_restore_completed` / `_timeout` / `_failed`.
+- **File list (§14.13, pending Walter's sign-off):** the list has moved off the user page to its own page,
+  `GET /admin/users/<id>/safety-delta`.
+  - Only IT admins can open it; Auditors and Users get 403.
+  - **Every view is audited** as `safety_delta_viewed`, recording the viewer oid and UPN, the time, which
+    user's list, and the entry count. File names are never written to the log.
+- Version 0.3.0, so the User-Agent is `…|SpringSync/0.3`.
+
+### Added
+- Migration 3 (expand-only): `last_crit_error`, `safety_restore_when`, `safety_approved_deletes`,
+  `safety_accept_state(_at)`, `restore_timeouts`.
+- Tests: 199 total (55 smoke, 8 integration against real rclone v1.75.2). The new tests cover every
+  decision above. Two are the ones added at the parent's request: the `--force` timeout (no re-run), and the
+  admin-only, audited list view.
+
 ## 0.2.0 (unreleased, lab build, 2026-10-20). Follows SPEC.md v0.2
 ### Changed
 - **Classifier rewritten to SPEC v0.2 §9.4.** It uses the exit code **plus the exact v1.75.2 log text**:

@@ -92,41 +92,43 @@ Also not covered by local tests:
 - ~~IT-Backups copy~~ is deferred by SPEC v0.2 to before go-live, not before the pilot. It is still not
   built.
 
-### Still open or ambiguous (v0.2)
-1. **The "retryable" text doesn't guarantee recovery.** Against the real v1.75.2:
-   - After a genuine lockout (`*.lst-err`), the next `--resilient` run reports
-     `cannot find prior Path1 or Path2 listings` with the *retryable* line, yet it can never succeed without
-     `--resync`.
-   - The same happens if the listings are lost or corrupted (`empty prior Path1 listing`).
-   - The worker isn't exposed to this after a lockout, because the user stays `critical`. In other cases it
-     wastes 2 runs before the escalate-after-3 rule fires.
-   - **Proposal:** treat "cannot find prior … listings" and "empty prior … listing" as an immediate
-     `critical`. This needs a spec decision; v0.2 follows §9.4 literally.
-2. **Lockout under `--resilient` isn't reproducible locally.** The integration test gets the real
-   `Must run --resync` text by dropping `--resilient`. Lab test T-B* should capture a real lockout with our
-   exact flags.
-3. **Restore timing:** §9.1 confines the *initial* resync to `resync_hours`. I treat a safety-abort Restore
-   as not initial: it runs at the next slot inside active hours, still one resync at a time. Approved
-   resyncs after a `critical` result keep the v0.1 behaviour and do wait for `resync_hours`. Confirm this is
-   intended.
-4. **Who sees the delta list?** §9.4 puts the list "on the admin page". The list contains file names, which
-   §6.5 and research §1.4 otherwise keep from everyone but the user. v0.2 shows it to IT admins only, never
-   to auditors. **Walter should confirm** that IT admins may see file names in this case.
-5. **How Restore and Accept deletes work:**
-   - Both require the delta list first.
-   - Accept deletes requires typing the UPN.
-   - The decision is one-shot. If the `--force` run fails or the NAS is down, the user stays in
-     `safety_abort` and a new decision is needed.
-   - The `--force` run has no time limit, because an interrupted run would need a second approval.
-   - Confirm these are the wanted semantics.
-6. **`users.state` and `sync_runs.result`** value lists in SPEC §5 don't yet include `safety_abort`,
-   `critical_retryable` or `usage` (§9.4 introduces them). `sync_runs.kind` also gains `delta` and `force`.
-   The spec table should be updated to match.
-7. **`caddy build-info` output format** (tab-separated `dep <module> <version> <h1>`) is assumed, not tested.
-   No Caddy binary here; part of T-C1. `go version -m` is printed alongside it as a cross-check.
-8. **Worker hardening:** `NoNewPrivileges` stays off, because the worker needs sudo for the helper. A
-   socket-activated helper would allow it.
-9. **The internal web→worker token** is derived from the data key with HMAC. It's fine on loopback, but it
-   is not a separate secret.
-10. **Option B "mounted persistently"** is per-run idempotent mounts, as accepted in v0.2. A boot-time mount
-    unit is an allowed refinement and not built.
+### Resolved by SPEC v0.3 (closed)
+- ~~"Retryable" text doesn't guarantee recovery~~: escalation now happens on the same error twice in a row,
+  immediately on a check-access failure, or on the 3rd in a row. "cannot find prior listings" therefore
+  locks out on its 2nd occurrence.
+- ~~Restore timing~~: next slot by default, or **Run tonight**.
+- ~~Restore / Accept-deletes semantics~~: Accept deletes has a 24 h expiry, a pre-run recount, the normal
+  run-time limit, no automatic re-run, and full audit.
+
+### Still open or ambiguous (v0.3)
+1. **§14.13: may IT admins see file names in the Accept-deletes list?** Walter has to sign off. **This
+   stays OPEN and is going to Mark via Gidget.** Until then:
+   - the list has its own page that only IT admins can open;
+   - Auditors and Users get 403;
+   - every view is audited (who, when, which user's list, entry count);
+   - the DB, issues, audit log and auditor views carry counts only.
+2. **Restore and the run-time limit.** §9.4.1 says Restore "uses the normal run-time limit" (25 min), even
+   for **Run tonight**, which exists for big drives. A large Restore will therefore time out.
+   - What v0.3 does: on a timeout the user stays paused, an alert opens, and the admin clicks Restore again.
+     Progress is kept because resync is additive. Nothing re-runs automatically, in line with "only an admin
+     starts a resync".
+   - **Question:** should a Restore continue automatically after a timeout, or should Run tonight have no
+     limit or a longer one?
+3. **What a "delete count" is.** It is the number of `File was deleted` deltas, on both sides, in the dry
+   run. Each detected deletion becomes exactly one delete on the other side. Confirm, versus rclone's stats
+   `deletes` or the `Queue delete` lines.
+4. **What breaks a "consecutive" chain.** Any other result breaks it, including a NAS-unreachable attempt
+   where rclone never ran. Confirm whether a mount failure should break the chain or be skipped.
+5. **Run ordering.** The Accept-deletes pre-check is its own `sync_runs` row (kind `delta`). It is created
+   after the `force` row, so ids aren't in chronological order. Cosmetic.
+6. **A safety abort during onboarding** can't happen in practice, because resync doesn't check max-delete.
+   If it did, the user would leave `onboarding`. Not specified.
+7. **SPEC §5 value lists** (`users.state`, `sync_runs.result`/`kind`) still lack `safety_abort`,
+   `critical_retryable`, `usage`, `cancelled`, `delta` and `force`.
+8. **Lockout under `--resilient`** still isn't reproducible locally. The integration test drops
+   `--resilient`. A T-B* lab test should capture a real one.
+9. **`caddy build-info` format** (used by the plugin-pin check) is untested until T-C1.
+10. **Worker hardening:** `NoNewPrivileges` is off because the worker needs sudo. A socket-activated helper
+    would allow it.
+11. **The internal web→worker token** is HMAC-derived from the data key, not a separate secret.
+12. **Option B "mounted persistently"** is per-run idempotent mounts. A boot-time mount unit is not built.

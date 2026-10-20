@@ -73,16 +73,28 @@
   can read them from a shell if his account is in `adm` (`LOG_READERS="walter"` at install). They contain
   file names, which is why they are not in the UI.
 
-## Safety-abort decisions (SPEC v0.2 §9.4)
+## Safety-abort decisions (SPEC v0.3 §9.4.1, §14.13)
 - The read-only `--dry-run --force` delta list contains file names. It is stored as a 0600 file
-  (`/var/lib/<slug>/safety/<uid>.json`, erased at offboarding) and rendered **only** on the IT-admin user page,
-  because SPEC §9.4 asks for it there. The DB, issues, audit log and auditor pages hold counts only.
+  (`/var/lib/<slug>/safety/<uid>.json`, erased at offboarding).
+- **Pending Walter's sign-off (§14.13):** the list is rendered only on its own page,
+  `GET /admin/users/<id>/safety-delta`.
+  - Only the Admins group can open it; Auditors and Users get 403.
+  - **Every view is audited** as `safety_delta_viewed`, with the viewer's oid and UPN, the time, which
+    user's list, and the entry count.
+  - The user summary page, DB, issues, audit log and auditor pages hold counts only.
+- An Accept-deletes approval:
+  - binds the exact delete count the admin saw (a stale page is rejected);
+  - expires after 24 h;
+  - is voided if the pre-run dry-run recount differs;
+  - is consumed when the run starts. A timed-out or failed `--force` run never repeats.
 - **Restore**, **Accept deletes** and **Refresh delta** are POST actions under `/admin/users/<id>/…`, so they
   require the Admins group plus CSRF. Every one returns 403 for Auditors and Users, and a test enforces this.
 - Each decision is audit-logged with the actor, the parsed abort counts and the delta summary. The worker
   logs `accept_deletes_started` / `accept_deletes_completed` and `safety_restore_completed`.
-- `--force` exists in exactly two code paths: the read-only delta dry-run, and the one Accept-deletes run,
-  whose approval is consumed before the run starts. It is never combined with `--resync`, and never appears
+- `--force` exists in exactly three code paths:
+  - the read-only delta dry-run;
+  - the read-only pre-run recount;
+  - the one Accept-deletes run, whose approval is consumed before the run starts. It is never combined with `--resync`, and never appears
   on a scheduled run. Tests assert all of this.
 
 ## Audit log
