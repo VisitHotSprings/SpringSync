@@ -19,7 +19,7 @@ from odnas.bisync import render_filters
 from odnas.config import TOKEN_MODE_BROKER, Config
 from odnas.crypto import Keyring
 from odnas.entra import EntraClient
-from odnas.nas import MountHelperClient, NasAccessProvider, provider_from_settings
+from odnas.nas import V_AUTH_FAILED, V_OK, MountHelperClient, NasAccessProvider, provider_from_settings
 from odnas.notify import Alert, Alerter, Notifier
 from odnas.runner import (JobRunner, ProcessRunner, _recipients, accept_expired, expire_accept_approvals,
                           sweep_runtime)
@@ -164,14 +164,65 @@ class Worker:
             held = D.parse_iso(u["tonight_held_at"])
             if held is not None and now - held < timedelta(hours=12):
                 continue
-            self.db.update_profile(u["id"], tonight_held_at=D.iso(now))
+            nights = (u["tonight_hold_nights"] or 0) + 1
+            # SPEC v0.6: first hold of this Restore -> low; the same Restore held again -> medium
+            sev = "low" if nights == 1 else "medium"
+            self.db.update_profile(u["id"], tonight_held_at=D.iso(now), tonight_hold_nights=nights)
             self.db.audit("system", "safety_restore_tonight_deferred", u["id"],
                           {"minutes_left": left // 60, "min_required": D.TONIGHT_MIN_REMAINING_S // 60,
-                           "window": s.resync_hours, "auto_requeued": bool(u["safety_restore_requeued"])})
-            self.alerter.raise_(Alert("restore_deferred", "low",
+                           "window": s.resync_hours, "auto_requeued": bool(u["safety_restore_requeued"]),
+                           "nights_held": nights, "severity": sev})
+            if nights > 1:
+                self.alerter.resolve(u["id"], "restore_deferred")   # re-open at the higher severity
+            self.alerter.raise_(Alert("restore_deferred", sev,
                                       f"{u['upn']}: tonight Restore held for the next night "
-                                      f"(only {left // 60} min left before the window closes)", u["id"]),
+                                      f"(only {left // 60} min left before the window closes; "
+                                      f"held {nights} night(s))", u["id"]),
                                 _recipients(s))
+
+    def _nas_global_pause(self, s, now: datetime) -> bool:
+        """SPEC v0.6 §9.4 (Option B): while the global NAS pause is set, no NAS runs start. It clears only
+        after IT saves a new nas_svc_password AND a test mount with it succeeds. A rejected test marks that
+        password as tried (never retried: avoids locking out svc-sync); NAS-unreachable tests retry every
+        5 min. Returns True while paused."""
+        f = self.db.flag(D.NAS_GLOBAL_PAUSE)
+        if f is None:
+            return False
+        rec = _recipients(s)
+        if s.nas_option != "B":
+            self.db.clear_flag(D.NAS_GLOBAL_PAUSE)
+            self.db.audit("system", "nas_global_pause_cleared", "", {"reason": "nas_option_changed",
+                                                                     "nas_option": s.nas_option})
+            self.alerter.resolve(None, "nas_global_pause")
+            return False
+        pw_ver = self.db.setting_version("nas_svc_password")
+        if pw_ver is None or pw_ver in (f.get("pw_version"), f.get("tested_pw_version")):
+            return True   # no new password since the pause / since the last rejected test
+        last = D.parse_iso(f.get("last_test_at"))
+        if f.get("last_test_pw") == pw_ver and last is not None and now - last < timedelta(minutes=5):
+            return True
+        probe = next((u for u in self.db.users() if u["state"] not in (D.REMOVED, D.OFFBOARDING, D.INVITED)
+                      and u["local_name"]), None)
+        if probe is None:
+            return True   # nothing to test against yet; stays paused
+        res = self.provider_factory().verify(probe["local_name"], "")
+        self.db.update_flag(D.NAS_GLOBAL_PAUSE, last_test_at=D.iso(now), last_test_pw=pw_ver)
+        if res.status == V_OK:
+            self.db.clear_flag(D.NAS_GLOBAL_PAUSE)
+            self.db.audit("system", "nas_global_pause_cleared", "",
+                          {"reason": "svc_sync_password_updated_and_test_mount_ok", "paused_since": f["set_at"],
+                           "test_share_user": probe["id"]})
+            self.alerter.resolve(None, "nas_global_pause")
+            return False
+        if res.status == V_AUTH_FAILED:
+            self.db.update_flag(D.NAS_GLOBAL_PAUSE, tested_pw_version=pw_ver)
+            self.db.audit("system", "nas_global_pause_test_failed", "", {"result": res.status})
+            self.alerter.raise_(Alert("nas_global_pause_test_failed", "high",
+                                      "The new svc-sync password was rejected by the NAS; syncing stays paused.",
+                                      None), rec)
+        else:
+            self.db.audit("system", "nas_global_pause_test_failed", "", {"result": res.status, "retry": "5 min"})
+        return True
 
     def tick(self, now: datetime | None = None, wait: bool = False) -> list[tuple[str, str]]:
         now = now or D.utcnow()
@@ -185,6 +236,7 @@ class Worker:
         self._staleness(users, s, now)
         expire_accept_approvals(self.db, self.alerter, s, now)
         self._tonight_holds(users, s, now)
+        nas_paused = self._nas_global_pause(s, now)
         if self.draining():
             return []
         cap = self.governor.max_concurrent(now, s.max_concurrent)
@@ -198,6 +250,8 @@ class Worker:
             kind = self.choose_job(u, s, now)
             if not kind:
                 continue
+            if nas_paused and (kind != "offboard" or u["final_sync_requested"]):
+                continue  # SPEC v0.6: global NAS pause -> no NAS runs for anyone (user states unchanged)
             next_slot_restore = (kind == "resync" and u["state"] == D.SAFETY_ABORT and u["onboarding_completed_at"]
                                  and u["safety_restore_when"] != D.RESTORE_TONIGHT)
             if kind == "resync" and not next_slot_restore and \

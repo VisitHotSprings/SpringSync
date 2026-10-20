@@ -1,3 +1,4 @@
+{% if nas_pause %}<p class="banner critical"><strong>All NAS syncs are paused</strong> since {{ nas_pause.set_at|local }}: {{ nas_pause.reason }}. No retries until IT saves a new svc-sync password in Settings and a test mount succeeds.{% if nas_pause.tested_pw_version %} The last new password was also rejected.{% endif %}</p>{% endif %}
 <h2>Service health</h2>
 <table>
 <tr><th>Worker</th><td><span class="badge {{ 'ok' if worker_alive else 'critical' }}">{{ 'alive' if worker_alive else 'DOWN' }}</span> last heartbeat {{ worker_hb|local }}</td></tr>
@@ -7,6 +8,7 @@
 <tr><th>Disk free</th><td>{{ disk if disk is not none else '?' }}%</td></tr>
 <tr><th>Audit chain</th><td>{{ chain.detail if chain else 'not verified yet' }}</td></tr>
 <tr><th>NAS option</th><td>{{ nas_option }}</td></tr>
+<tr><th>NAS sync</th><td><span class="badge {{ 'critical' if nas_pause else 'ok' }}">{{ 'PAUSED (server-wide)' if nas_pause else 'running' }}</span></td></tr>
 </table>
 <h2>Open issues</h2>
 <table><tr><th>Opened</th><th>User</th><th>Type</th><th>Severity</th><th>Summary</th></tr>

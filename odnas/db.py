@@ -241,7 +241,22 @@ MIGRATIONS: list[str] = [
     UPDATE sync_profiles SET onboarding_completed_at = COALESCE(last_success_at, '1970-01-01T00:00:00+00:00')
      WHERE user_id IN (SELECT user_id FROM sync_runs WHERE kind = 'bisync' AND result = 'ok');
     """,
+    # 6: SPEC v0.6. Expand-only.
+    #    tonight_hold_nights: nights the CURRENT Restore has been held by the 30-min cutoff (1 -> low alert,
+    #    2+ -> medium). Reset when an admin chooses a new Restore.
+    #    worker_state: server-wide flags. Row key 'nas_global_pause' = Option B svc-sync login rejected.
+    """
+    ALTER TABLE sync_profiles ADD COLUMN tonight_hold_nights INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE worker_state (
+        key TEXT PRIMARY KEY,
+        set_at TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        detail_json TEXT NOT NULL DEFAULT '{}'
+    );
+    """,
 ]
+
+NAS_GLOBAL_PAUSE = "nas_global_pause"   # worker_state key (SPEC v0.6 §9.4, Option B only)
 
 TONIGHT_MIN_REMAINING_S = 30 * 60   # SPEC v0.5 §9.4.1: a tonight run starts only with >= 30 min left
 
@@ -491,6 +506,43 @@ class DB:
         return self.all(sql + " ORDER BY seq DESC LIMIT ?", (*p, limit))
 
     # ---- heartbeat -------------------------------------------------------
+    # ---- server-wide flags (worker_state) ------------------------------------
+    def flag(self, key: str) -> dict | None:
+        r = self.one("SELECT * FROM worker_state WHERE key=?", (key,))
+        if r is None:
+            return None
+        return {"key": r["key"], "set_at": r["set_at"], "reason": r["reason"], **json.loads(r["detail_json"])}
+
+    def set_flag(self, key: str, reason: str, **detail) -> bool:
+        """Set a flag unless already set. Returns True if newly set."""
+        with self.tx() as c:
+            if c.execute("SELECT 1 FROM worker_state WHERE key=?", (key,)).fetchone():
+                return False
+            c.execute("INSERT INTO worker_state(key, set_at, reason, detail_json) VALUES (?,?,?,?)",
+                      (key, iso(utcnow()), reason, json.dumps(detail)))
+            return True
+
+    def update_flag(self, key: str, **detail) -> None:
+        f = self.flag(key)
+        if f is None:
+            return
+        cur = {k: v for k, v in f.items() if k not in ("key", "set_at", "reason")}
+        cur.update(detail)
+        self.q("UPDATE worker_state SET detail_json=? WHERE key=?", (json.dumps(cur), key))
+
+    def clear_flag(self, key: str) -> bool:
+        with self.tx() as c:
+            return c.execute("DELETE FROM worker_state WHERE key=?", (key,)).rowcount > 0
+
+    def setting_version(self, key: str) -> str | None:
+        """An opaque version of a stored setting: a hash of the stored (for secrets: encrypted, freshly
+        nonced) value, so every save is a new version. Never the secret itself."""
+        r = self.one("SELECT value_json FROM settings WHERE key=?", (key,))
+        if r is None:
+            return None
+        import hashlib
+        return hashlib.sha256(str(r["value_json"]).encode()).hexdigest()[:16]
+
     def beat(self, component: str, detail: str = "") -> None:
         self.q("INSERT INTO heartbeat(component, ts, detail) VALUES (?,?,?) ON CONFLICT(component) DO UPDATE SET "
                "ts=excluded.ts, detail=excluded.detail", (component, iso(utcnow()), detail))

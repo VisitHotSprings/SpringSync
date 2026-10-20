@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.6.0 (unreleased, lab build, 2026-10-20). Follows SPEC.md v0.6
+### Changed
+- **Onboarding complete** stays "first successful normal bisync" (`onboarding_completed_at`); a Restore or
+  resync never sets it. Tests cover an abort on that first bisync after a Restore (still an onboarding abort).
+- **Restore after an onboarding dry-run abort** goes straight to the real `--resync` (no fresh dry run). The
+  click is additionally audited as `admin_first_sync_approved_via_restore` (actor, UPN, `dry_run_skipped`).
+- **Tonight-Restore hold alert:** `restore_deferred` is `low` on the first night the Restore is held and
+  `medium` if the same Restore is held a second (or later) night. New per-Restore count
+  `sync_profiles.tonight_hold_nights`; reset (with `tonight_held_at`) by a new Restore click and by the
+  safety-abort clean-up. The automatic tonight re-queue is the same Restore and keeps the count. The alert
+  closes when the Restore starts. The audit entry records `nights_held` and `severity`.
+- **Option B: `svc-sync` login rejected = server-wide NAS pause:**
+  - Server-wide flag: `worker_state` row with key `nas_global_pause` (reason, time, detail).
+  - Set by the first run whose mount gets a logon failure under Option B; later runs that hit it add nothing.
+  - One `high` alert `nas_global_pause` (no user), audit `nas_global_pause_set`.
+  - No user is set to `nas_auth_failed`, and no per-user failure count or mount-failure count changes.
+  - While set, the scheduler starts no NAS runs (offboarding without a final sync still proceeds); user
+    states are unchanged; runs in flight finish normally.
+  - **Auto-resume:** the worker notices a newly saved `nas_svc_password` (an opaque version hash of the
+    stored ciphertext, never the secret) within one tick and runs one test mount (helper `verify`) against an
+    existing user's `Home-<user>` share. OK → pause cleared, alert closed, audit `nas_global_pause_cleared`,
+    users continue at their next slot. Rejected → audit `nas_global_pause_test_failed`, a `high`
+    `nas_global_pause_test_failed` alert, and that password is **never retried**. NAS unreachable → retried
+    every 5 min.
+  - Switching `nas_option` away from B clears the pause (audited, reason `nas_option_changed`).
+  - Banner on the admin dashboard, Settings page and auditor view; "NAS sync: PAUSED (server-wide)" row.
+  - Option A behaviour unchanged.
+- Version 0.6.0 (User-Agent `…|SpringSync/0.6`).
+
+### Added
+- Migration 6 (expand-only): `sync_profiles.tonight_hold_nights`, table `worker_state`.
+- Tests: 243 total (55 smoke, 9 integration against real rclone v1.75.2).
+
 ## 0.5.0 (unreleased, lab build, 2026-10-20). Follows SPEC.md v0.5
 ### Changed
 - **Mount-failure counter (§9.4):** only a **successful mount** resets `consecutive_mount_failures`.

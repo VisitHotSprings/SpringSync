@@ -115,35 +115,38 @@ Also not covered by local tests:
 - ~~Safety abort during onboarding~~: normal safety abort; onboarding stays incomplete; Restore re-runs
   the onboarding `--resync`.
 
-### Still open or ambiguous (v0.5)
+### Resolved by SPEC v0.6 (closed)
+- ~~When onboarding counts as complete~~: first successful normal bisync only.
+- ~~Restore after an onboarding dry-run abort~~: straight to `--resync`; click audited as the first-sync approval.
+- ~~Hold alert severity~~: `low`, then `medium` if the same Restore is held a second night.
+- ~~`nas_auth` under Option B~~: one global NAS pause, one high alert, no retries, auto-resume after a new
+  password and a good test mount.
+
+### Still open or ambiguous (v0.6)
 1. **§14.13: may IT admins see file names in the Accept-deletes list?** Walter has to sign off. **This
-   stays OPEN and is going to Mark via Gidget.** Until then:
-   - the list has its own page that only IT admins can open;
-   - Auditors and Users get 403;
-   - every view is audited (who, when, which user's list, entry count);
-   - the DB, issues, audit log and auditor views carry counts only.
-2. **Re-queued tonight Restores share the window.** They run under the "one resync at a time" rule, so with
-   several users re-queued the same night, later ones start with less of the window left. SPEC v0.5 says
-   this is fine for the pilot unless Mark objects.
-3. **When onboarding counts as "complete".** The build marks it complete after the first successful normal
-   bisync, because §6.1 step 8 says that bisync can still trip. §9.4.1 says onboarding "stays incomplete
-   until it [the Restore] succeeds". After a successful Restore the user is `active` but still incomplete
-   until a bisync passes, so a second abort on that bisync is again an onboarding abort. Confirm.
-4. **Restore after an abort on the onboarding dry run** runs the real onboarding `--resync` without a new
-   clean dry run or a separate **Approve initial sync**: the Restore click is the approval. Can a
-   `--resync --dry-run` trip a safety abort at all? We have never seen it (resync doesn't check
-   max-delete). Confirm, or require a fresh dry run first.
-5. **Onboarding Restore ignores Next slot / Run tonight.** It always follows the onboarding resync rules
-   (resync window, no limit), so the 30-minute cutoff and the automatic re-queue don't apply. Confirm.
-6. **The 30-minute cutoff applies to tonight Restores only.** Approved initial and post-critical resyncs
-   have no time limit, so there is no cutoff for them.
-7. **The deferral alert is "low"** and is raised once per night. Stated nowhere; choose a severity.
-8. **Lockout under `--resilient`** still isn't reproducible locally. The integration test drops
+   stays OPEN and is going to Mark via Gidget.** Until then the list has its own IT-admin-only page,
+   Auditors and Users get 403, every view is audited, and everything else carries counts only.
+2. **Re-queued tonight Restores share the window** (one resync at a time). Accepted for the pilot unless
+   Mark objects. Same for: the onboarding Restore follows the onboarding resync rules, and the 30-min cutoff
+   applies only to tonight Restores.
+3. **Global NAS pause: when the test mount runs.** SPEC §6.4 says saving the password "runs a test mount".
+   The build runs it on the worker's next tick (within 60 s), because only the worker holds the mount
+   helper. The Settings banner says so. Confirm, or add a synchronous test on save.
+4. **Global NAS pause: what is test-mounted.** One `verify` against the first existing (not removed,
+   offboarding or invited) user's `Home-<user>` share. With no such user it stays paused. A dedicated test
+   share would avoid depending on one user's share existing.
+5. **Global NAS pause: a NAS-unreachable test** is retried every 5 min (no logon was attempted, so there is
+   no lockout risk). A rejected new password is never retried; IT has to save another one.
+6. **Global NAS pause and offboarding.** Offboarding with a requested final sync waits for the pause to
+   clear. Without a final sync it proceeds (crypto-erase and unmount only). Confirm.
+7. **Global NAS pause cleared by switching to Option A.** Not in the spec; the build clears it (audited),
+   since the svc-sync login no longer applies.
+8. **Hold count across the automatic re-queue.** The re-queue counts as the same Restore, so a re-queued
+   Restore held once is at `low` and a second hold is `medium`. A new admin click resets it.
+9. **Lockout under `--resilient`** still isn't reproducible locally. The integration test drops
    `--resilient`. A T-B* lab test should capture a real one.
-9. **`caddy build-info` format** (used by the plugin-pin check) is untested until T-C1.
-10. **Worker hardening:** `NoNewPrivileges` is off because the worker needs sudo. A socket-activated helper
+10. **`caddy build-info` format** (used by the plugin-pin check) is untested until T-C1.
+11. **Worker hardening:** `NoNewPrivileges` is off because the worker needs sudo. A socket-activated helper
     would allow it.
-11. **The internal web→worker token** is HMAC-derived from the data key, not a separate secret.
-12. **Option B "mounted persistently"** is per-run idempotent mounts. A boot-time mount unit is not built.
-13. **`nas_auth` under Option B** (the service account's password is wrong) also pauses the affected user
-    as `nas_auth_failed`. The spec only describes Option A. Under B it would hit every user at once.
+12. **The internal web→worker token** is HMAC-derived from the data key, not a separate secret.
+13. **Option B "mounted persistently"** is per-run idempotent mounts. A boot-time mount unit is not built.

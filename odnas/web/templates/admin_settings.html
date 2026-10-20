@@ -1,5 +1,6 @@
 {% extends "base.html" %}{% block body %}
 <h1>Settings</h1>
+{% if nas_pause %}<p class="banner critical"><strong>All NAS syncs are paused</strong> since {{ nas_pause.set_at|local }}: {{ nas_pause.reason }}. Save the correct svc-sync password below; the worker then runs a test mount within 60 s and, if it succeeds, resumes syncing (audited). A rejected password is not retried.</p>{% endif %}
 {% if msg %}<p class="msg">{{ msg }}</p>{% endif %}{% if err %}<p class="msg err">{{ err }}</p>{% endif %}
 <p><small>Changes apply on the worker's next tick (within 60 s). Every change is audited. Secret fields can only be replaced, never viewed.
 Email delivery is disabled in v0.1 (open decision: alert mail path). Alerts show on the admin page.</small></p>

@@ -337,7 +337,7 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         return {"users": db.users(include_removed=True), "issues": db.open_issues(), "worker_alive": alive,
                 "worker_hb": hb, "expiry": credential_expiry(cfg, s), "disk": disk_free_pct(cfg.p_state),
                 "tls": tls["detail"] if tls else "", "chain": db.heartbeat("audit_chain"), "s": s,
-                "nas_option": s.nas_option}
+                "nas_option": s.nas_option, "nas_pause": db.flag(D.NAS_GLOBAL_PAUSE)}
 
     @adm.get("", response_class=HTMLResponse)
     def admin_home(request: Request, sess: dict = Depends(admin_dep)):
@@ -349,6 +349,7 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         set_flags = {k: bool(db.one("SELECT 1 FROM settings WHERE key=? AND is_secret=1", (k,)))
                      for k, sp in settings_store.SPECS.items() if sp.secret}
         return render(request, "admin_settings.html", sess, s=s, specs=settings_store.SPECS, set_flags=set_flags,
+                      nas_pause=db.flag(D.NAS_GLOBAL_PAUSE),
                       msg=request.query_params.get("msg", ""), err=request.query_params.get("err", ""))
 
     @adm.post("/settings")
@@ -491,10 +492,16 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
                     when = D.RESTORE_TONIGHT   # the onboarding --resync runs in resync_hours (no time limit)
                     details["onboarding_resync"] = True
                 db.update_profile(uid, safety_action=D.SAFETY_RESTORE, safety_action_by=actor, safety_action_at=now,
-                                  safety_restore_when=when, safety_restore_requeued=0, needs_resync=1,
+                                  safety_restore_when=when, safety_restore_requeued=0, tonight_hold_nights=0,
+                                  tonight_held_at=None, needs_resync=1,
                                   resync_approved_by=actor,
                                   resync_approved_at=now, safety_accept_state=None, safety_accept_state_at=None)
                 details["when"] = when
+                if onboarding and no_delta:
+                    # SPEC v0.6 §6.1 step 8: straight to the real onboarding --resync (no fresh dry run); the
+                    # Restore click IS the approval of the first sync, recorded as its own audit action.
+                    db.audit(actor, "admin_first_sync_approved_via_restore", uid,
+                             {"by_upn": sess.get("upn"), "abort_during": "dryrun", "dry_run_skipped": True})
             else:
                 if form.get("confirm") != u["upn"]:
                     raise HTTPException(400, "Type the user's UPN to confirm Accept deletes.")

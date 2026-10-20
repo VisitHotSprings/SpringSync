@@ -41,7 +41,7 @@ def test_bisync_command_matches_spec(cfg):
     assert flag_value(cmd, "--retries") == "3" and flag_value(cmd, "--retries-sleep") == "30s"
     assert flag_value(cmd, "--low-level-retries") == "10"
     assert flag_value(cmd, "--transfers") == "4" and flag_value(cmd, "--checkers") == "8"
-    assert flag_value(cmd, "--user-agent") == "NONISV|VisitHotSprings|SpringSync/0.5"
+    assert flag_value(cmd, "--user-agent") == "NONISV|VisitHotSprings|SpringSync/0.6"
     assert flag_value(cmd, "--workdir").endswith(f"/bisync/{UID}")
     assert flag_value(cmd, "--log-file").endswith(f"/runs/{UID}/42.json")
     assert flag_value(cmd, "--filters-file").endswith("bisync-filters.txt")

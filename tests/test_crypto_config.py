@@ -55,7 +55,7 @@ def test_config_validation():
     c = load_config(env={**base, "ODNAS_TOKEN_MODE": "tmpfs_config", "ODNAS_CREDENTIAL_TYPE": "secret",
                          "ODNAS_SLUG": "homesync", "ODNAS_PRODUCT_NAME": "HomeSync"})
     assert c.check_filename == ".homesync-check" and c.p_db == "/var/lib/homesync/db/homesync.db"
-    assert c.user_agent == "NONISV|VisitHotSprings|HomeSync/0.5"
+    assert c.user_agent == "NONISV|VisitHotSprings|HomeSync/0.6"
 
 
 def test_config_toml(tmp_path):

@@ -156,6 +156,12 @@ class JobRunner:
             creds = self.db.nas_credential(self.kr, uid) if provider.per_user_credentials else None
             m = provider.mount(uid, u["local_name"], creds)
             if m.status == V_AUTH_FAILED:
+                if getattr(provider, "option", "A") == "B":
+                    # SPEC v0.6 §9.4: the shared svc-sync login was rejected -> server-wide pause, not a
+                    # per-user failure (no user goes to nas_auth_failed), one high alert, no retries.
+                    return self._finish(uid, kind, run_id,
+                                        Outcome(R_NAS_AUTH, "svc-sync NAS login rejected: global NAS pause (no retry)"),
+                                        stats, s, mounted=False, global_nas=True)
                 return self._finish(uid, kind, run_id, Outcome(R_NAS_AUTH, "NAS login failed (no retry)"), stats, s,
                                     mounted=False)
             if m.status != V_OK:
@@ -205,6 +211,7 @@ class JobRunner:
                                    "onboarding_resync": not u["onboarding_completed_at"],
                                    "approved_by": u["safety_action_by"],
                                    "auto_requeued": bool(u["safety_restore_requeued"])})
+                    self.alerter.resolve(uid, "restore_deferred")   # no longer held
             pr = self.proc.run(cmd, env, limit, stderr_path=lp + ".stderr")
             text = Path(lp).read_text(errors="replace") if Path(lp).exists() else ""
             stats = parse_json_log(text)
@@ -342,9 +349,9 @@ class JobRunner:
 
     # ------------------------------------------------------------------
     def _finish(self, uid: str, kind: str, run_id: int, oc: Outcome, st: Stats, s, exit_code: int | None = None,
-                nas_down: bool = False, mounted: bool = True) -> Outcome:
+                nas_down: bool = False, mounted: bool = True, global_nas: bool = False) -> Outcome:
         apply_outcome(self.db, self.alerter, s, uid, kind, run_id, oc, st, exit_code, self.governor, nas_down,
-                      mounted=mounted)
+                      mounted=mounted, global_nas=global_nas)
         return oc
 
 
@@ -354,7 +361,7 @@ def _recipients(s) -> list[str]:
 
 def apply_outcome(db: D.DB, alerter: Alerter, s, uid: str, kind: str, run_id: int, oc: Outcome, st: Stats,
                   exit_code: int | None, governor: ThrottleGovernor, nas_down: bool = False,
-                  mounted: bool = True) -> None:
+                  mounted: bool = True, global_nas: bool = False) -> None:
     now = D.utcnow()
     db.finish_run(run_id, exit_code=exit_code, result=oc.result, detail=oc.detail[:500],
                   files_copied=st.files_copied, files_deleted=st.files_deleted, bytes=st.bytes,
@@ -490,6 +497,8 @@ def apply_outcome(db: D.DB, alerter: Alerter, s, uid: str, kind: str, run_id: in
             db.set_state(uid, D.NEEDS_REAUTH, "Microsoft sign-in expired or revoked")
             alerter.raise_(Alert("needs_reauth", "medium", f"{upn}: needs to reconnect Microsoft", uid,
                                  notify_user=True), rec)
+    elif oc.result == R_NAS_AUTH and global_nas:
+        set_nas_global_pause(db, alerter, rec, uid, run_id)
     elif oc.result == R_NAS_AUTH:
         db.set_state(uid, D.NAS_AUTH_FAILED, "NAS login failed; paused, no retries")
         db.q("UPDATE nas_credentials SET last_failure_at=?, failure_count=failure_count+1 WHERE user_id=?",
@@ -545,11 +554,27 @@ def apply_outcome(db: D.DB, alerter: Alerter, s, uid: str, kind: str, run_id: in
     db.audit("system", f"run_{kind}", uid, {"run_id": run_id, "result": oc.result, "exit_code": exit_code})
 
 
+def set_nas_global_pause(db: D.DB, alerter: Alerter, rec: list[str], uid: str | None, run_id: int | None) -> bool:
+    """SPEC v0.6: one server-wide NAS pause for a rejected Option B svc-sync login. Idempotent: concurrent
+    runs that hit the same rejection add no second alert or audit entry."""
+    new = db.set_flag(D.NAS_GLOBAL_PAUSE, "svc-sync NAS login rejected",
+                      pw_version=db.setting_version("nas_svc_password"), first_user=uid, run_id=run_id)
+    if new:
+        db.audit("system", "nas_global_pause_set", uid or "",
+                 {"reason": "svc_sync_login_rejected", "run_id": run_id})
+        alerter.raise_(Alert("nas_global_pause", "high",
+                             "NAS svc-sync login rejected: all NAS syncs paused (no retries). "
+                             "Update the svc-sync password in Settings; a test mount then resumes syncing.", None),
+                       rec)
+    return new
+
+
 _SAFETY_CLEAR = dict(safety_abort_at=None, safety_abort_json=None, safety_delta_requested=0, safety_delta_at=None,
                      safety_delta_summary=None, safety_action=None, safety_action_by=None, safety_action_at=None,
                      safety_restore_when=None, safety_approved_deletes=None, safety_accept_state=None,
                      safety_accept_state_at=None, restore_timeouts=0, safety_approved_del_p1=None,
-                     safety_approved_del_p2=None, safety_restore_requeued=0)
+                     safety_approved_del_p2=None, safety_restore_requeued=0, tonight_hold_nights=0,
+                     tonight_held_at=None)
 
 
 def _critical(db: D.DB, alerter: Alerter, rec: list[str], u, uid: str, prof: dict, detail: str,
