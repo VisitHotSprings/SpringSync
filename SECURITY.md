@@ -64,11 +64,26 @@
 - **Never shown:** file names, file contents, tokens, passwords, or rclone logs.
   - Preflight file lists are visible only to the user they belong to.
   - Issue summaries carry counts only.
+  - After a **safety abort**, Walter sees the side and counts ("too many deletes on the NAS (4 of 21,
+    limit 10%)") and which decision was taken, by whom and when. He does **not** see the delta file list or
+    the Restore / Accept-deletes buttons.
 - Every route under `/audit` is GET only. A test enforces this, and another test sends every non-GET route
   in the app with an auditor session and expects 403.
 - **On the server:** run logs in `/var/log/<slug>/runs` are `0640 <slug>:adm` (setgid directory), so Walter
   can read them from a shell if his account is in `adm` (`LOG_READERS="walter"` at install). They contain
   file names, which is why they are not in the UI.
+
+## Safety-abort decisions (SPEC v0.2 §9.4)
+- The read-only `--dry-run --force` delta list contains file names. It is stored as a 0600 file
+  (`/var/lib/<slug>/safety/<uid>.json`, erased at offboarding) and rendered **only** on the IT-admin user page,
+  because SPEC §9.4 asks for it there. The DB, issues, audit log and auditor pages hold counts only.
+- **Restore**, **Accept deletes** and **Refresh delta** are POST actions under `/admin/users/<id>/…`, so they
+  require the Admins group plus CSRF. Every one returns 403 for Auditors and Users, and a test enforces this.
+- Each decision is audit-logged with the actor, the parsed abort counts and the delta summary. The worker
+  logs `accept_deletes_started` / `accept_deletes_completed` and `safety_restore_completed`.
+- `--force` exists in exactly two code paths: the read-only delta dry-run, and the one Accept-deletes run,
+  whose approval is consumed before the run starts. It is never combined with `--resync`, and never appears
+  on a scheduled run. Tests assert all of this.
 
 ## Audit log
 - The log is append-only: SQLite triggers abort UPDATE and DELETE.

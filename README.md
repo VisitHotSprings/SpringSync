@@ -62,18 +62,44 @@ flowchart LR
    certificate to swap the real refresh token for a short-lived access token, and stores the rotated
    refresh token re-encrypted. This is pending lab test T-A3. The **tmpfs_config fallback** puts the real
    refresh token plus the client secret in the tmpfs config and reads the rotated token back afterwards.
-4. `rclone bisync` runs with the SPEC §9.3 flag set and a worker-enforced time limit (25 min for
-   incremental runs). When the limit is hit the worker sends SIGINT once, waits 120 s, then SIGKILL.
-5. The worker classifies the exit code and the JSON log, updates state and issues, unmounts, and shreds
-   the temp files. Steps 2–5 always clean up in `finally`.
+4. `rclone bisync` runs with the SPEC §9.3 flag set (including `--color NEVER`) and a worker-enforced time
+   limit (25 min for incremental runs). When the limit is hit the worker sends SIGINT once, waits 120 s, then SIGKILL.
+5. The worker classifies the run from the exit code **plus the exact v1.75.2 log text** (SPEC v0.2 §9.4),
+   updates state and issues, unmounts, and shreds the temp files. Steps 2–5 always clean up in `finally`.
+
+**Classifier (SPEC v0.2 §9.4, `odnas/classify.py`)**, checked in this order:
+
+| Check | Result |
+|---|---|
+| broker / log auth error | `auth` → `needs_reauth` or `blocked_by_ca` |
+| worker time limit hit | `timeout` (continues at the next slot) |
+| exit 0 + `Bisync successful` | `ok` |
+| `object="Safety abort"` + `too many deletes (>N%, X of Y) on PathN …`, or `Safety abort: all files were changed …` (expected with exit 1) | **`safety_abort`** |
+| exit 7 + `Bisync aborted. Must run --resync to recover.` | `critical` (lockout) |
+| exit 7 + `Bisync aborted. Error is retryable without --resync due to --resilient mode.` | `critical_retryable` (next run proceeds; escalates to `critical` after 3 in a row) |
+| exit 7 with neither line, or exit code and log text disagree | `critical` (fail safe, warning logged) |
+| exit 2 | `usage` (bug: user paused, high issue) |
+| exit 1, 3, 4, 5, 6, 8, 10, or killed by a signal | `retryable` |
 
 **User lifecycle:**
 - **Onboarding:** `onboarding` → Microsoft connect → NAS login verified → preflight filename scan →
   `--resync --dry-run` → admin clicks **Approve initial sync** → real `--resync` (one user at a time, inside
   the resync window) → `active`.
-- **Failure states:** `needs_reauth` / `blocked_by_ca` (from the broker or the rclone log), `nas_auth_failed`
-  (paused, no retries), `critical` (exit 7 or a safety abort; needs **Approve resync**), `paused` (admin action
-  or rclone usage error).
+- **Failure states:**
+  - `needs_reauth` / `blocked_by_ca` (from the broker or the rclone log);
+  - `nas_auth_failed` (paused, no retries);
+  - `critical` (exit-7 lockout; needs **Approve resync**);
+  - `safety_abort` (see below);
+  - `paused` (admin action or rclone usage error).
+- **Safety abort** (a tripped `--max-delete` or "all files changed"): nothing was synced, and a plain run
+  would trip again every slot, so the user is paused.
+  1. The worker runs a read-only `bisync --dry-run --force` to build a delta list. The list holds file names,
+     so it is kept in a 0600 file and shown on the IT-admin page only.
+  2. The admin then chooses one of two actions, both audited:
+     - **Restore:** one `--resync --resync-mode newer`, which copies the deleted files back.
+     - **Accept deletes:** one `--force` run, after typing the UPN to confirm. The approval is used up when
+       the run starts, so it can never repeat.
+  3. Either action sets the user back to `active`. Walter sees the counts but not the list or the buttons.
 - **Offboarding:** admin clicks **Offboard** → optional final sync → crypto-erase (credential rows deleted with
   `secure_delete`, then `VACUUM`) → workdir removed → `removed`.
 

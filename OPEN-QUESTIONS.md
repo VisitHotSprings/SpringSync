@@ -73,30 +73,60 @@ Also not covered by local tests:
 16. **Key escrow:** where Mark keeps the offline copy of `data.key`.
 
 ## D. Spec ambiguities and build findings
-- **Caddy plugin pin:**
-  - The SPEC table gives `caddy-dns/googleclouddns@6fcdbd98a856` "(v1.1.0 + libdns v1.2.0)".
-  - §14.12 says "v1.1.0".
-  - The research says the module was bumped to libdns v1.2.0 after v1.1.0.
-  - `install.sh` pins the full commit `6fcdbd98a8565df50ff40ff53411dc6c8d97dcd9`. Confirm that is intended,
-    or choose the v1.1.0 tag (T-C1).
-- **Go toolchain checksum:** SPEC pins Go 1.27.3 for xcaddy but gives no SHA-256. `install.sh` has a
-  `GO_SHA256` placeholder and **refuses to build Caddy** until it is filled in from go.dev/dl.
-- **Exit 7 vs. `--max-delete`:** with rclone v1.75.2 a tripped `--max-delete` under `--resilient` exits 1,
-  not 7. We treat it as critical by matching the log text. The integration test pins this behavior.
-- **A missing check file blocks even the dry-run** (exit 7). Onboarding now touches `.springsync-check` on
-  both sides before the dry-run.
-- **"Outside business hours"** for the initial resync isn't defined. It is the `resync_hours` setting,
-  default 18:00–07:00 CT.
-- **Single `nonce` column** in the SPEC §5 tables would reuse a GCM nonce across username and password. Each
-  value carries its own nonce instead.
-- **Mount-helper verbs:** §7.4 lists `mount|umount`, while §4.2 needs a verify step, so a third verb,
-  `verify`, was added.
-- **Option B "mounted persistently":** implemented as per-run idempotent mounts that are left mounted. A
-  boot-time mount unit may be preferable.
-- **SQLAlchemy/Alembic** (SPEC §3) were replaced by stdlib sqlite3 with numbered migrations
-  (`odnas db-upgrade` in place of `springsync db upgrade`).
-- **Backups to the NAS `IT-Backups` share** (SPEC §10.4) are not implemented. Backups stay local in
-  `/var/backups/<slug>`.
-- **Worker hardening:** `NoNewPrivileges` is off because the worker needs sudo. A socket-activated helper
-  would allow it.
-- **requirements.lock** was compiled on Python 3.13 and must be regenerated on the 24.04 host (3.12).
+
+### Resolved by SPEC v0.2 (closed)
+- ~~Caddy plugin pin~~:
+  - The tag `v1.1.0` is commit `6fcdbd98a8565df50ff40ff53411dc6c8d97dcd9` (checked on proxy.golang.org).
+  - sum.golang.org gives `h1:SDxKxFh7d5Jq2/JPnu9Jv8ErOIdfXmK+Oad0qVzQi80=`, and its go.mod requires
+    libdns/googleclouddns v1.2.0.
+  - install.sh pins the tag and verifies the module version and hash in the built binary. The build itself
+    is still T-C1.
+- ~~Go toolchain checksum~~: pinned at `65efbc80…379b40`, which matches go.dev/dl JSON as of 2026-10-20.
+  The refusal is removed.
+- ~~Exit 7 vs. `--max-delete`~~: §9.4 is rewritten, implemented, and verified against the real binary.
+- ~~Check files before the dry-run~~, ~~"outside business hours" (`resync_hours`)~~, ~~single nonce column~~,
+  ~~mount-helper `verify` verb~~, ~~Option B per-run mounts~~ and ~~SQLAlchemy/Alembic → stdlib sqlite3~~
+  are all accepted in SPEC v0.2.
+- ~~requirements.lock on 3.13~~ is accepted as a pre-install step (regenerate on 24.04 / 3.12).
+  **It is still to do before the first install.**
+- ~~IT-Backups copy~~ is deferred by SPEC v0.2 to before go-live, not before the pilot. It is still not
+  built.
+
+### Still open or ambiguous (v0.2)
+1. **The "retryable" text doesn't guarantee recovery.** Against the real v1.75.2:
+   - After a genuine lockout (`*.lst-err`), the next `--resilient` run reports
+     `cannot find prior Path1 or Path2 listings` with the *retryable* line, yet it can never succeed without
+     `--resync`.
+   - The same happens if the listings are lost or corrupted (`empty prior Path1 listing`).
+   - The worker isn't exposed to this after a lockout, because the user stays `critical`. In other cases it
+     wastes 2 runs before the escalate-after-3 rule fires.
+   - **Proposal:** treat "cannot find prior … listings" and "empty prior … listing" as an immediate
+     `critical`. This needs a spec decision; v0.2 follows §9.4 literally.
+2. **Lockout under `--resilient` isn't reproducible locally.** The integration test gets the real
+   `Must run --resync` text by dropping `--resilient`. Lab test T-B* should capture a real lockout with our
+   exact flags.
+3. **Restore timing:** §9.1 confines the *initial* resync to `resync_hours`. I treat a safety-abort Restore
+   as not initial: it runs at the next slot inside active hours, still one resync at a time. Approved
+   resyncs after a `critical` result keep the v0.1 behaviour and do wait for `resync_hours`. Confirm this is
+   intended.
+4. **Who sees the delta list?** §9.4 puts the list "on the admin page". The list contains file names, which
+   §6.5 and research §1.4 otherwise keep from everyone but the user. v0.2 shows it to IT admins only, never
+   to auditors. **Walter should confirm** that IT admins may see file names in this case.
+5. **How Restore and Accept deletes work:**
+   - Both require the delta list first.
+   - Accept deletes requires typing the UPN.
+   - The decision is one-shot. If the `--force` run fails or the NAS is down, the user stays in
+     `safety_abort` and a new decision is needed.
+   - The `--force` run has no time limit, because an interrupted run would need a second approval.
+   - Confirm these are the wanted semantics.
+6. **`users.state` and `sync_runs.result`** value lists in SPEC §5 don't yet include `safety_abort`,
+   `critical_retryable` or `usage` (§9.4 introduces them). `sync_runs.kind` also gains `delta` and `force`.
+   The spec table should be updated to match.
+7. **`caddy build-info` output format** (tab-separated `dep <module> <version> <h1>`) is assumed, not tested.
+   No Caddy binary here; part of T-C1. `go version -m` is printed alongside it as a cross-check.
+8. **Worker hardening:** `NoNewPrivileges` stays off, because the worker needs sudo for the helper. A
+   socket-activated helper would allow it.
+9. **The internal web→worker token** is derived from the data key with HMAC. It's fine on loopback, but it
+   is not a separate secret.
+10. **Option B "mounted persistently"** is per-run idempotent mounts, as accepted in v0.2. A boot-time mount
+    unit is an allowed refinement and not built.

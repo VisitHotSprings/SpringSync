@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.2.0 (unreleased, lab build, 2026-10-20). Follows SPEC.md v0.2
+### Changed
+- **Classifier rewritten to SPEC v0.2 §9.4.** It uses the exit code **plus the exact v1.75.2 log text**:
+  - the JSON `object`/`msg` fields are read, with a text-mode fallback, and ANSI codes are stripped;
+  - the check order is ok → safety_abort → lockout → retryable → mismatch → exit code;
+  - new results are `safety_abort`, `critical_retryable` and `usage`;
+  - exits 8 and 10 are retryable;
+  - exit 9 and other unknown codes are `critical`, with a warning;
+  - exit 0 without `Bisync successful` is `critical` (fail safe);
+  - a process killed by a signal is `retryable`.
+- `critical_retryable` (exit 7 + "retryable … --resilient mode") proceeds at the next slot and escalates to
+  `critical` after 3 in a row. `critical` (exit 7 + "Must run --resync") locks the user out until an admin
+  approves a resync.
+- Every bisync command now carries `--color NEVER` (§9.3).
+- Version 0.2.0, so the User-Agent is `…|SpringSync/0.2`.
+
+### Added
+- **Safety-abort flow (§9.4, §6.4):**
+  - a new user state, `safety_abort`, which pauses the user and opens a critical issue (counts only);
+  - an automatic read-only `bisync --dry-run --force` that builds the delta list (0600 file, IT-admin page
+    only);
+  - IT-admin actions **Restore** (one approved `--resync --resync-mode newer`), **Accept deletes** (one
+    `--force` run; UPN confirmation; the approval is consumed at run start, so it never repeats) and
+    **Refresh delta**;
+  - every decision is audited, the auditor view shows counts and decisions only, and all these POST
+    routes return 403 for auditors.
+- **Migration 2** (expand-only): new `sync_profiles` columns, and `sync_runs.kind` gains `delta` and `force`.
+  It rebuilds the table, keeps its history, and v0.1 code still runs against it.
+- **Pins:**
+  - `install.sh` now builds Caddy with `caddy-dns/googleclouddns@v1.1.0`, the tag at
+    `6fcdbd98a8565df50ff40ff53411dc6c8d97dcd9`.
+  - It forces `GOPROXY=proxy.golang.org` and `GOSUMDB=sum.golang.org`.
+  - It refuses a build unless `caddy build-info` shows `v1.1.0` with go.sum hash
+    `h1:SDxKxFh7d5Jq2/JPnu9Jv8ErOIdfXmK+Oad0qVzQi80=`, and the same check runs before skipping a rebuild.
+  - `GO_SHA256` is pinned to `65efbc80…379b40`, which removes the v0.1 refusal.
+- **Tests:** 185 in total (54 smoke, 8 integration against real rclone v1.75.2). New coverage:
+  - exit 1 safety abort, which also re-trips;
+  - the delta list, Accept deletes and Restore end to end;
+  - check-access exit 7 that is retryable and recovers;
+  - a real exit-7 lockout;
+  - the classifier rules 1–6, with exact strings;
+  - the admin-only routes, including auditor and user 403s;
+  - migration 2 on a v0.1 DB;
+  - the Caddy plugin pin check.
+
+### Resolved from 0.1 OPEN-QUESTIONS §D (accepted in SPEC v0.2)
+These are now spec, not deviations:
+- check files are created before the dry-run;
+- `resync_hours`;
+- a nonce per encrypted value;
+- the mount-helper `verify` verb;
+- stdlib sqlite3 with numbered migrations;
+- Option B per-run idempotent mounts;
+- backups to `IT-Backups` are deferred until before go-live;
+- `requirements.lock` is regenerated on 24.04;
+- the Caddy plugin pin;
+- the Go checksum;
+- exit codes.
+
 ## 0.1.0 (unreleased, lab build, 2026-10-20)
 First working local version, built to `SPEC.md` v0.1 (source of truth) and `research.md`.
 
@@ -34,7 +93,7 @@ First working local version, built to `SPEC.md` v0.1 (source of truth) and `rese
   DNS-01 template and unit, RESTORE.md, and a CI template with gitleaks.
 - 148 pytest tests, including 5 integration tests against the real rclone v1.75.2.
 
-### Deviations from SPEC.md (with reasons)
+### Deviations from SPEC.md v0.1 (with reasons; items 1–8 and 11 were accepted into SPEC v0.2)
 1. **stdlib `sqlite3` + numbered migrations instead of SQLAlchemy + Alembic.** One small DB, fewer
    dependencies, and the same expand-only rule. `PRAGMA user_version` tracks the schema.
 2. **Exit codes, safety aborts:** the real rclone v1.75.2 exits **1**, not 7, when `--max-delete` trips under
