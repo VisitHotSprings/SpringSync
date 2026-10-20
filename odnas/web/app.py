@@ -402,7 +402,10 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
              "accept_state_at": u["safety_accept_state_at"], "restore_timeouts": u["restore_timeouts"],
              "expires_at": D.iso(at + timedelta(hours=D.ACCEPT_TTL_HOURS))
              if at and u["safety_action"] == D.SAFETY_ACCEPT else None,
-             "delete_count": None, "del_p1": None, "del_p2": None, "has_list": False}
+             "delete_count": None, "del_p1": None, "del_p2": None, "has_list": False,
+             "onboarding": not u["onboarding_completed_at"],
+             "no_delta": json.loads(u["safety_abort_json"] or "{}").get("during") == "dryrun",
+             "tonight_held_at": u["tonight_held_at"]}
         if with_delta and u["safety_delta_at"]:
             d = _delta_doc(u["id"])
             if d is not None:
@@ -466,8 +469,15 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
             db.update_profile(uid, final_sync_requested=1 if form.get("final_sync") == "on" else 0)
             db.set_state(uid, D.OFFBOARDING, f"offboarded by {sess['upn']}")
         elif action in ("safety-restore", "safety-accept-deletes"):
-            # SPEC v0.2 §9.4: both need the dry-run delta list first; both are audited with the counts
-            if not u["safety_delta_at"] or u["safety_delta_requested"]:
+            # SPEC v0.2 §9.4: both need the dry-run delta list first; both are audited with the counts.
+            # SPEC v0.5 §6.1 step 8: an abort on the onboarding dry-run has no listings, hence no delta list
+            # and nothing to accept; only Restore (= re-run the onboarding --resync) is offered.
+            abort = json.loads(u["safety_abort_json"] or "{}")
+            onboarding = not u["onboarding_completed_at"]
+            no_delta = abort.get("during") == "dryrun"
+            if no_delta and action == "safety-accept-deletes":
+                raise HTTPException(409, "Nothing to accept: the abort happened on the onboarding dry run.")
+            if not no_delta and (not u["safety_delta_at"] or u["safety_delta_requested"]):
                 raise HTTPException(409, "Wait for the dry-run delta list before choosing.")
             if u["safety_action"]:
                 raise HTTPException(409, f"Already approved: {u['safety_action']}.")
@@ -477,6 +487,9 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
                 when = str(form.get("when") or D.RESTORE_NEXT_SLOT)
                 if when not in (D.RESTORE_NEXT_SLOT, D.RESTORE_TONIGHT):
                     raise HTTPException(400, "Choose 'next slot' or 'tonight'.")
+                if onboarding:
+                    when = D.RESTORE_TONIGHT   # the onboarding --resync runs in resync_hours (no time limit)
+                    details["onboarding_resync"] = True
                 db.update_profile(uid, safety_action=D.SAFETY_RESTORE, safety_action_by=actor, safety_action_at=now,
                                   safety_restore_when=when, safety_restore_requeued=0, needs_resync=1,
                                   resync_approved_by=actor,

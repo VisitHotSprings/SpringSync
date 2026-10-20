@@ -230,7 +230,20 @@ MIGRATIONS: list[str] = [
     ALTER TABLE sync_profiles ADD COLUMN safety_restore_requeued INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE sync_profiles ADD COLUMN consecutive_mount_failures INTEGER NOT NULL DEFAULT 0;
     """,
+    # 5: SPEC v0.5. Expand-only.
+    #    onboarding_completed_at: NULL = onboarding incomplete; set by the first successful normal bisync
+    #    after the onboarding --resync (§6.1 step 8). Backfilled for users that already had one.
+    #    tonight_held_at: last audited "<30 min left, held for the next night" deferral (§9.4.1), so the
+    #    60 s tick logs it once per night, not every minute.
+    """
+    ALTER TABLE sync_profiles ADD COLUMN onboarding_completed_at TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN tonight_held_at TEXT;
+    UPDATE sync_profiles SET onboarding_completed_at = COALESCE(last_success_at, '1970-01-01T00:00:00+00:00')
+     WHERE user_id IN (SELECT user_id FROM sync_runs WHERE kind = 'bisync' AND result = 'ok');
+    """,
 ]
+
+TONIGHT_MIN_REMAINING_S = 30 * 60   # SPEC v0.5 §9.4.1: a tonight run starts only with >= 30 min left
 
 SECRET_DETAIL_KEYS = {"password", "secret", "token", "refresh_token", "access_token", "smtp_password",
                       "client_secret", "nas_password", "credential"}

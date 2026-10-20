@@ -108,33 +108,42 @@ Also not covered by local tests:
 - ~~Run ordering~~: fixed (recount row before force row).
 - ~~SPEC §5 value lists~~: aligned, and checked by a test.
 
-### Still open or ambiguous (v0.4)
+### Resolved by SPEC v0.5 (closed)
+- ~~Per-side counts vs. real rclone~~: counts come from the delta dry run, never the log.
+- ~~Which runs reset the mount-failure counter~~: only a successful mount; `nas_auth` neither counts nor resets.
+- ~~Tonight run near 07:00~~: needs at least 30 min left, else waits for the next night (audited).
+- ~~Safety abort during onboarding~~: normal safety abort; onboarding stays incomplete; Restore re-runs
+  the onboarding `--resync`.
+
+### Still open or ambiguous (v0.5)
 1. **§14.13: may IT admins see file names in the Accept-deletes list?** Walter has to sign off. **This
    stays OPEN and is going to Mark via Gidget.** Until then:
    - the list has its own page that only IT admins can open;
    - Auditors and Users get 403;
    - every view is audited (who, when, which user's list, entry count);
    - the DB, issues, audit log and auditor views carry counts only.
-2. **"Parsed from the per-side `msg` lines" (§9.4) vs. real rclone.** v1.75.2 stops at the first side that
-   trips, so only one Safety-abort line appears even when both sides are over the limit (integration test).
-   The build shows the side(s) logged plus both counts from the delta dry-run, and approval uses the delta
-   counts. Suggest the spec says so.
-3. **Which runs reset the mount-failure counter.** The spec says "any run where rclone starts". A NAS
-   *logon* failure (`nas_auth`) neither counts nor resets it (it has its own state). An internal error
-   after the mount is treated as "rclone started" and resets it. Confirm.
-4. **Re-queued tonight Restore and concurrency.** It runs under the "one resync at a time" rule like any
-   tonight Restore (a next-slot Restore is exempt). With several users re-queued on the same night, each
-   later one starts only when the previous one finishes, with less of the window left (and may then be
-   stopped at 07:00). Fine for a 3-5 user pilot; confirm.
-5. **A tonight run started very close to 07:00** gets only the minutes left in the window. The scheduler
-   does not hold back a run that can't finish; it then counts as "still running at 07:00" (paused + alert).
-   Option: a minimum remaining time (e.g. 60 min) before starting a tonight run.
-6. **A safety abort during onboarding** can't happen in practice, because resync doesn't check max-delete.
-   If it did, the user would leave `onboarding`. Not specified.
-7. **Lockout under `--resilient`** still isn't reproducible locally. The integration test drops
+2. **Re-queued tonight Restores share the window.** They run under the "one resync at a time" rule, so with
+   several users re-queued the same night, later ones start with less of the window left. SPEC v0.5 says
+   this is fine for the pilot unless Mark objects.
+3. **When onboarding counts as "complete".** The build marks it complete after the first successful normal
+   bisync, because §6.1 step 8 says that bisync can still trip. §9.4.1 says onboarding "stays incomplete
+   until it [the Restore] succeeds". After a successful Restore the user is `active` but still incomplete
+   until a bisync passes, so a second abort on that bisync is again an onboarding abort. Confirm.
+4. **Restore after an abort on the onboarding dry run** runs the real onboarding `--resync` without a new
+   clean dry run or a separate **Approve initial sync**: the Restore click is the approval. Can a
+   `--resync --dry-run` trip a safety abort at all? We have never seen it (resync doesn't check
+   max-delete). Confirm, or require a fresh dry run first.
+5. **Onboarding Restore ignores Next slot / Run tonight.** It always follows the onboarding resync rules
+   (resync window, no limit), so the 30-minute cutoff and the automatic re-queue don't apply. Confirm.
+6. **The 30-minute cutoff applies to tonight Restores only.** Approved initial and post-critical resyncs
+   have no time limit, so there is no cutoff for them.
+7. **The deferral alert is "low"** and is raised once per night. Stated nowhere; choose a severity.
+8. **Lockout under `--resilient`** still isn't reproducible locally. The integration test drops
    `--resilient`. A T-B* lab test should capture a real one.
-8. **`caddy build-info` format** (used by the plugin-pin check) is untested until T-C1.
-9. **Worker hardening:** `NoNewPrivileges` is off because the worker needs sudo. A socket-activated helper
+9. **`caddy build-info` format** (used by the plugin-pin check) is untested until T-C1.
+10. **Worker hardening:** `NoNewPrivileges` is off because the worker needs sudo. A socket-activated helper
     would allow it.
-10. **The internal web→worker token** is HMAC-derived from the data key, not a separate secret.
-11. **Option B "mounted persistently"** is per-run idempotent mounts. A boot-time mount unit is not built.
+11. **The internal web→worker token** is HMAC-derived from the data key, not a separate secret.
+12. **Option B "mounted persistently"** is per-run idempotent mounts. A boot-time mount unit is not built.
+13. **`nas_auth` under Option B** (the service account's password is wrong) also pauses the affected user
+    as `nas_auth_failed`. The spec only describes Option A. Under B it would hit every user at once.

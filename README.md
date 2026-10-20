@@ -80,7 +80,8 @@ flowchart LR
 | exit 7 with neither line, or exit code and log text disagree | `critical` (fail safe, warning logged) |
 | exit 2 | `usage` (bug: user paused, high issue) |
 | exit 1, 3, 4, 5, 6, 8, 10, or killed by a signal | `retryable` |
-| NAS mount failed, rclone never started (SPEC v0.4) | `retryable`, but **outside** the same-error chain (neither counts nor resets it); separate counter, admin alert after 2 in a row, no lockout |
+| NAS mount failed, rclone never started (SPEC v0.4) | `retryable`, but **outside** the same-error chain (neither counts nor resets it); separate counter, admin alert after 2 in a row, no lockout. Only a **successful mount** resets the counter (v0.5) |
+| NAS rejected the login (wrong password) | `nas_auth` → `nas_auth_failed`: paused at once, no retries, own alert; leaves the mount-failure counter unchanged (v0.5) |
 
 Value names (`users.state`, `sync_runs.result`, `sync_runs.kind`) match SPEC v0.4 §5 exactly; a test
 compares the code's lists with the spec text.
@@ -103,8 +104,10 @@ compares the code's lists with the spec text.
      - **Restore:** one `--resync --resync-mode newer`. It copies the deleted files back.
        - **Next slot** (default): normal 25-minute limit. If it hits the limit it is **re-queued once as a
          tonight run** automatically (audited, admin notified, no new approval: resync never deletes).
-       - **Run tonight**: waits for `resync_hours` and may run until the window closes (07:00 CT). If it is
-         still running then, it is stopped, the user stays paused and the admin is alerted (click again).
+       - **Run tonight**: waits for `resync_hours` (not bound by active hours) and may run until the window
+         closes (07:00 CT). It starts only with **at least 30 minutes left**; otherwise it is held for the
+         next night (audited once per night, low alert). If it is still running at 07:00, it is stopped, the
+         user stays paused and the admin is alerted (click again).
      - **Accept deletes:** the admin approves the delete count **for each side** (Path1 = OneDrive,
        Path2 = NAS) and types the UPN to confirm. Normal run-time limit.
        - The approval expires after 24 h.
@@ -114,7 +117,12 @@ compares the code's lists with the spec text.
        - A NAS mount failure before the run does not use up the approval.
        - If the `--force` run times out or fails, the user stays paused, and it never re-runs on its own.
   3. Success sets the user back to `active`.
-  4. Walter sees the counts and decision state, but not the list or the buttons. The list has its own
+  4. **During onboarding** (SPEC v0.5 §6.1 step 8): onboarding counts as complete only after the first
+     successful normal bisync. An abort on the onboarding dry run or the first bisync is handled the same
+     way, onboarding stays incomplete, and **Restore re-runs the onboarding `--resync`** (resync window, one
+     at a time, no time limit). An abort on the onboarding dry run has no bisync listings, so no delta list
+     can be built and only Restore is offered.
+  5. Walter sees the counts and decision state, but not the list or the buttons. The list has its own
      IT-admin-only page, and every view of it is audited (§14.13, pending Walter's sign-off).
 - **Offboarding:** admin clicks **Offboard** → optional final sync → crypto-erase (credential rows deleted with
   `secure_delete`, then `VACUUM`) → workdir removed → `removed`.
@@ -172,7 +180,7 @@ sudo REPO_URL=git@github.com:<OWNER>/<REPO>.git TENANT_ID=... CLIENT_ID=... \
      GROUP_USERS=... GROUP_ADMINS=... GROUP_AUDITORS=... \
      SYNC_HOST=sync.hotsprings.org GCP_ACME_PROJECT=... ACME_ZONE=... \
      LAN_CIDRS="10.0.0.0/16" ADMIN_CIDR="10.0.10.0/24" LOG_READERS="walter" \
-     ./deploy/install.sh --version v0.4.0           # add --dry-run to see the plan first
+     ./deploy/install.sh --version v0.5.0           # add --dry-run to see the plan first
 ```
 `install.sh` is idempotent: every step checks state first, and it never overwrites keys, the DB, or settings.
 It handles:

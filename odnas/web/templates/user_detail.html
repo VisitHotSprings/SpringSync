@@ -18,24 +18,27 @@
 <tr><th>Dry-run delta</th><td>{% if safety.delta_pending %}being prepared (read-only dry run){% else %}{{ safety.delta_summary or '-' }} {{ safety.delta_at|local if safety.delta_at else '' }}{% endif %}</td></tr>
 <tr><th>Decision</th><td>{% if safety.action == 'restore' %}Restore ({{ 'tonight, in the resync window' if safety.restore_when == 'tonight' else 'next slot' }}) approved by {{ safety.action_by }} {{ safety.action_at|local }}{% if safety.requeued %}; automatically re-queued for tonight after hitting the run-time limit{% endif %}{% elif safety.action == 'accept_deletes' %}Accept deletes (Path1 {{ safety.approved_p1 }}, Path2 {{ safety.approved_p2 }}) approved by {{ safety.action_by }} {{ safety.action_at|local }}; expires {{ safety.expires_at|local }}{% else %}waiting for IT{% endif %}</td></tr>
 <tr><th>Accept-deletes approval</th><td>{{ safety.accept_state or '-' }}{% if safety.accept_state_at and safety.accept_state != 'pending' %} ({{ safety.accept_state_at|local }}){% endif %}</td></tr>
+{% if safety.onboarding %}<tr><th>Onboarding</th><td>incomplete{% if safety.no_delta %} (stopped on the onboarding dry run; no delta list is possible yet){% endif %}. Restore re-runs the onboarding resync.</td></tr>{% endif %}
+{% if safety.tonight_held_at and safety.action == 'restore' %}<tr><th>Held</th><td>{{ safety.tonight_held_at|local }}: less than 30 min left in the night window; waits for the next night</td></tr>{% endif %}
 {% if safety.restore_timeouts %}<tr><th>Restore timeouts</th><td>{{ safety.restore_timeouts }}</td></tr>{% endif %}
 </table>
 {% if admin %}
 <p><strong>Restore</strong> runs one <code>--resync --resync-mode newer</code> (next slot: normal run-time limit, re-queued once for tonight if it runs out; tonight: until the window closes): files deleted on one side are copied back from the other.
 <strong>Accept deletes</strong> runs bisync once with <code>--force</code> (normal run-time limit) after a fresh dry run confirms the approved delete count; the approval expires after 24 h. Deletions stay recoverable from the OneDrive recycle bin, the archive folder and NAS snapshots.</p>
 {% if safety.has_list %}<p><a href="/admin/users/{{ u.id }}/safety-delta">View the file list</a> (IT admins only; each view is audited).</p>{% endif %}
-{% if not safety.action and safety.delta_at and not safety.delta_pending %}
+{% if not safety.action and ((safety.delta_at and not safety.delta_pending) or safety.no_delta) %}
 <form class="inline" method="post" action="/admin/users/{{ u.id }}/safety-restore"><input type="hidden" name="csrf" value="{{ csrf }}">
-<label><input type="radio" name="when" value="next_slot" checked> next slot</label>
-<label><input type="radio" name="when" value="tonight"> run tonight (resync window)</label>
-<button>Restore (approve resync)</button></form>
+{% if safety.onboarding %}<button>Restore (re-run the onboarding resync, in the resync window)</button></form>
+{% else %}<label><input type="radio" name="when" value="next_slot" checked> next slot</label>
+<label><input type="radio" name="when" value="tonight"> run tonight (resync window, needs 30 min left)</label>
+<button>Restore (approve resync)</button></form>{% endif %}
 {% if safety.delete_count is not none %}
 <form class="inline" method="post" action="/admin/users/{{ u.id }}/safety-accept-deletes"><input type="hidden" name="csrf" value="{{ csrf }}">
 <input type="hidden" name="approved_deletes_path1" value="{{ safety.del_p1 }}"><input type="hidden" name="approved_deletes_path2" value="{{ safety.del_p2 }}">
 <label>Type the UPN to confirm <input type="text" name="confirm"></label><button>Accept deletes: Path1 {{ safety.del_p1 }}, Path2 {{ safety.del_p2 }} (one --force run)</button></form>
 {% endif %}
 {% endif %}
-{% if not safety.action %}<form class="inline" method="post" action="/admin/users/{{ u.id }}/safety-refresh-delta"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Refresh dry-run delta</button></form>{% endif %}
+{% if not safety.action and not safety.no_delta %}<form class="inline" method="post" action="/admin/users/{{ u.id }}/safety-refresh-delta"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Refresh dry-run delta</button></form>{% endif %}
 {% endif %}
 {% endif %}
 {% if admin %}

@@ -21,8 +21,10 @@ from odnas.crypto import Keyring
 from odnas.entra import EntraClient
 from odnas.nas import MountHelperClient, NasAccessProvider, provider_from_settings
 from odnas.notify import Alert, Alerter, Notifier
-from odnas.runner import JobRunner, ProcessRunner, accept_expired, expire_accept_approvals, sweep_runtime
-from odnas.scheduler import ThrottleGovernor, assign_offsets, in_window, weekly_check_due
+from odnas.runner import (JobRunner, ProcessRunner, _recipients, accept_expired, expire_accept_approvals,
+                          sweep_runtime)
+from odnas.scheduler import (ThrottleGovernor, assign_offsets, in_window, seconds_until_window_end,
+                             weekly_check_due)
 from odnas.tokens import BrokerTokenStrategy, TmpfsConfigStrategy, TokenBroker
 
 log = logging.getLogger("odnas.worker")
@@ -116,17 +118,22 @@ class Worker:
         if st == D.SAFETY_ABORT:
             # SPEC v0.2 §9.4: paused (a plain bisync would re-trip every slot). Only three things run:
             # the read-only `--dry-run --force` delta list, an admin-approved Restore (--resync),
-            # or one admin-approved Accept-deletes (--force) run. All respect the active-hours window.
+            # or one admin-approved Accept-deletes (--force) run.
+            if u["safety_action"] == D.SAFETY_RESTORE and u["safety_action_by"] and approved \
+                    and not u["safety_delta_requested"]:
+                if not u["onboarding_completed_at"]:
+                    # SPEC v0.5 §6.1 step 8: Restore = re-run the onboarding --resync, under the onboarding
+                    # resync rules (resync_hours, one at a time, no run-time limit)
+                    return "resync" if resync_ok else None
+                if u["safety_restore_when"] == D.RESTORE_TONIGHT:
+                    # tonight runs are bound by resync_hours (not active hours) and need >= 30 min left (v0.5)
+                    return "resync" if tonight_start_ok(now, s) else None
+                return "resync" if in_window(now, settings_store.active_window(s)) else None
             if not in_window(now, settings_store.active_window(s)):
                 return None
             if u["safety_delta_requested"]:
                 nxt = D.parse_iso(u["next_run_at"])
                 return "delta" if nxt is None or nxt <= now else None
-            if u["safety_action"] == D.SAFETY_RESTORE and u["safety_action_by"] and approved:
-                # SPEC v0.3 §9.4.1: next slot by default; "Run tonight" waits for resync_hours
-                if u["safety_restore_when"] == D.RESTORE_TONIGHT and not resync_ok:
-                    return None
-                return "resync"
             if u["safety_action"] == D.SAFETY_ACCEPT and u["safety_action_by"] \
                     and u["safety_approved_deletes"] is not None and not accept_expired(u, now):
                 return "force"
@@ -142,6 +149,30 @@ class Worker:
         nxt = D.parse_iso(u["next_run_at"])
         return "bisync" if nxt is None or nxt <= now else None
 
+    def _tonight_holds(self, users, s, now: datetime) -> None:
+        """SPEC v0.5 §9.4.1: a tonight Restore inside resync_hours with < 30 min left is held for the next
+        night. Audited (and a low alert) once per night: tonight_held_at dedupes the 60 s tick."""
+        win = settings_store.active_window_for(s.resync_hours)
+        for u in users:
+            if not (u["state"] == D.SAFETY_ABORT and u["safety_action"] == D.SAFETY_RESTORE and u["safety_action_by"]
+                    and u["resync_approved_by"] and u["onboarding_completed_at"]
+                    and u["safety_restore_when"] == D.RESTORE_TONIGHT):
+                continue
+            left = seconds_until_window_end(now, win)
+            if left is None or left >= D.TONIGHT_MIN_REMAINING_S:
+                continue
+            held = D.parse_iso(u["tonight_held_at"])
+            if held is not None and now - held < timedelta(hours=12):
+                continue
+            self.db.update_profile(u["id"], tonight_held_at=D.iso(now))
+            self.db.audit("system", "safety_restore_tonight_deferred", u["id"],
+                          {"minutes_left": left // 60, "min_required": D.TONIGHT_MIN_REMAINING_S // 60,
+                           "window": s.resync_hours, "auto_requeued": bool(u["safety_restore_requeued"])})
+            self.alerter.raise_(Alert("restore_deferred", "low",
+                                      f"{u['upn']}: tonight Restore held for the next night "
+                                      f"(only {left // 60} min left before the window closes)", u["id"]),
+                                _recipients(s))
+
     def tick(self, now: datetime | None = None, wait: bool = False) -> list[tuple[str, str]]:
         now = now or D.utcnow()
         s = self.settings()
@@ -153,6 +184,7 @@ class Worker:
                 self.db.update_profile(u["id"], slot_offset_min=offsets[u["id"]])
         self._staleness(users, s, now)
         expire_accept_approvals(self.db, self.alerter, s, now)
+        self._tonight_holds(users, s, now)
         if self.draining():
             return []
         cap = self.governor.max_concurrent(now, s.max_concurrent)
@@ -166,7 +198,7 @@ class Worker:
             kind = self.choose_job(u, s, now)
             if not kind:
                 continue
-            next_slot_restore = (kind == "resync" and u["state"] == D.SAFETY_ABORT
+            next_slot_restore = (kind == "resync" and u["state"] == D.SAFETY_ABORT and u["onboarding_completed_at"]
                                  and u["safety_restore_when"] != D.RESTORE_TONIGHT)
             if kind == "resync" and not next_slot_restore and \
                     any(k == "resync" for k in list(running.values()) + [k for _, k in started]):
@@ -273,3 +305,9 @@ def build_internal_app(w: Worker):
     return Starlette(routes=[Route("/broker/{uid}/token", token, methods=["POST"]),
                              Route("/internal/nas-verify", nas_verify, methods=["POST"]),
                              Route("/internal/health", health, methods=["GET"])])
+
+
+def tonight_start_ok(now: datetime, s) -> bool:
+    """Inside resync_hours with at least 30 minutes left before it closes (SPEC v0.5 §9.4.1)."""
+    left = seconds_until_window_end(now, settings_store.active_window_for(s.resync_hours))
+    return left is not None and left >= D.TONIGHT_MIN_REMAINING_S

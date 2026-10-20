@@ -156,12 +156,14 @@ class JobRunner:
             creds = self.db.nas_credential(self.kr, uid) if provider.per_user_credentials else None
             m = provider.mount(uid, u["local_name"], creds)
             if m.status == V_AUTH_FAILED:
-                return self._finish(uid, kind, run_id, Outcome(R_NAS_AUTH, "NAS login failed (no retry)"), stats, s)
+                return self._finish(uid, kind, run_id, Outcome(R_NAS_AUTH, "NAS login failed (no retry)"), stats, s,
+                                    mounted=False)
             if m.status != V_OK:
                 # SPEC v0.4: rclone never started. Approvals are NOT consumed (nothing ran) and the
                 # consecutive-error chain is untouched; mount failures are counted separately.
                 why = "NAS unreachable" if m.status == V_UNREACHABLE else "NAS mount error"
-                return self._finish(uid, kind, run_id, Outcome(R_RETRY, why), stats, s, nas_down=True)
+                return self._finish(uid, kind, run_id, Outcome(R_RETRY, why), stats, s, nas_down=True,
+                                    mounted=False)
             mounted = True
             # Single-use approvals are consumed once the mount is up, right before rclone runs, so a
             # crash or timeout can never turn them into a repeated --force / --resync.
@@ -200,6 +202,7 @@ class JobRunner:
                 if restore:
                     self.db.audit("system", "safety_restore_started", uid,
                                   {"run_id": run_id, "when": u["safety_restore_when"], "limit_s": limit,
+                                   "onboarding_resync": not u["onboarding_completed_at"],
                                    "approved_by": u["safety_action_by"],
                                    "auto_requeued": bool(u["safety_restore_requeued"])})
             pr = self.proc.run(cmd, env, limit, stderr_path=lp + ".stderr")
@@ -218,7 +221,8 @@ class JobRunner:
             return self._finish(uid, kind, run_id, oc, stats, s, exit_code=pr.exit_code)
         except Exception as e:  # never leave a run row open or secrets behind
             log.exception("job failed uid=%s kind=%s", uid, kind)
-            return self._finish(uid, kind, run_id, Outcome(R_ERROR, f"internal error: {type(e).__name__}"), stats, s)
+            return self._finish(uid, kind, run_id, Outcome(R_ERROR, f"internal error: {type(e).__name__}"), stats, s,
+                                mounted=mounted)
         finally:
             if auth is not None:
                 try:
@@ -237,6 +241,8 @@ class JobRunner:
         - 'tonight' Restore (admin choice or the automatic re-queue): until resync_hours closes (SPEC v0.4)
         - initial / post-critical resync and the onboarding dry-run: unbounded"""
         normal = s.run_time_limit_min * 60
+        if restore and not u["onboarding_completed_at"]:
+            return None   # SPEC v0.5: Restore during onboarding = the onboarding --resync (no limit, §6.1)
         if restore and u["safety_restore_when"] == D.RESTORE_TONIGHT:
             left = seconds_until_window_end(D.utcnow(), settings_store.active_window_for(s.resync_hours))
             return left if left is not None else normal   # started outside the window: fail safe to normal
@@ -336,8 +342,9 @@ class JobRunner:
 
     # ------------------------------------------------------------------
     def _finish(self, uid: str, kind: str, run_id: int, oc: Outcome, st: Stats, s, exit_code: int | None = None,
-                nas_down: bool = False) -> Outcome:
-        apply_outcome(self.db, self.alerter, s, uid, kind, run_id, oc, st, exit_code, self.governor, nas_down)
+                nas_down: bool = False, mounted: bool = True) -> Outcome:
+        apply_outcome(self.db, self.alerter, s, uid, kind, run_id, oc, st, exit_code, self.governor, nas_down,
+                      mounted=mounted)
         return oc
 
 
@@ -346,7 +353,8 @@ def _recipients(s) -> list[str]:
 
 
 def apply_outcome(db: D.DB, alerter: Alerter, s, uid: str, kind: str, run_id: int, oc: Outcome, st: Stats,
-                  exit_code: int | None, governor: ThrottleGovernor, nas_down: bool = False) -> None:
+                  exit_code: int | None, governor: ThrottleGovernor, nas_down: bool = False,
+                  mounted: bool = True) -> None:
     now = D.utcnow()
     db.finish_run(run_id, exit_code=exit_code, result=oc.result, detail=oc.detail[:500],
                   files_copied=st.files_copied, files_deleted=st.files_deleted, bytes=st.bytes,
@@ -361,12 +369,14 @@ def apply_outcome(db: D.DB, alerter: Alerter, s, uid: str, kind: str, run_id: in
     prof["backoff_factor"] = next_backoff(u["backoff_factor"], st.throttled)
 
     restore = kind == "resync" and u["state"] == D.SAFETY_ABORT
-    rclone_started = not nas_down and oc.result != R_NAS_AUTH
+    rclone_started = mounted and not nas_down and oc.result != R_NAS_AUTH
     # SPEC v0.4: a mount failure (rclone never started) is skipped by the same-error chain (neither counts
     # nor resets it) and is counted separately; any run where rclone starts resets that counter.
     if rclone_started and oc.result != R_CRIT_RETRY:   # any other rclone result breaks the chain
         prof.update(consecutive_crit_retry=0, last_crit_error=None)
-    if rclone_started:
+    if mounted:
+        # SPEC v0.5: ONLY a successful mount resets the mount-failure counter. nas_auth (wrong password)
+        # neither counts nor resets it; an internal error after a good mount does reset it.
         prof["consecutive_mount_failures"] = 0
         alerter.resolve(uid, "nas_unreachable")
     if oc.result == R_OK:
@@ -374,12 +384,16 @@ def apply_outcome(db: D.DB, alerter: Alerter, s, uid: str, kind: str, run_id: in
         alerter.resolve(uid, "repeated_failures", "repeated_timeouts", "nas_unreachable", "stale")
         if kind in ("bisync", "resync"):
             prof["last_success_at"] = D.iso(now)
+        if kind == "bisync" and not u["onboarding_completed_at"]:
+            prof["onboarding_completed_at"] = D.iso(now)       # SPEC v0.5 §6.1 step 8
+            db.audit("system", "onboarding_completed", uid, {"run_id": run_id})
         if kind == "resync":
             prof.update(needs_resync=0, resync_approved_by=None, resync_approved_at=None)
             if u["state"] == D.SAFETY_ABORT:
                 prof.update(**_SAFETY_CLEAR)
                 db.audit("system", "safety_restore_completed", uid,
-                         {"run_id": run_id, "result": oc.result, "copied": st.files_copied, "bytes": st.bytes})
+                         {"run_id": run_id, "result": oc.result, "copied": st.files_copied, "bytes": st.bytes,
+                          "onboarding_resync": not u["onboarding_completed_at"]})
                 alerter.resolve(uid, "safety_abort")
             if u["state"] in (D.ONBOARDING, D.CRITICAL, D.SAFETY_ABORT):
                 db.set_state(uid, D.ACTIVE)
@@ -422,8 +436,16 @@ def apply_outcome(db: D.DB, alerter: Alerter, s, uid: str, kind: str, run_id: in
     elif oc.result == R_SAFETY:
         sa = oc.safety
         prof.update(**_SAFETY_CLEAR)
-        prof.update(safety_abort_at=D.iso(now), safety_abort_json=json.dumps(sa.as_dict() if sa else {}),
-                    safety_delta_requested=1)
+        onboarding = not u["onboarding_completed_at"]
+        # SPEC v0.5 §6.1 step 8: same as any safety abort; onboarding stays incomplete. On the onboarding
+        # dry-run there are no bisync listings yet, so no `--dry-run --force` delta list can be built and
+        # nothing exists to "accept": the only action is Restore (= re-run the onboarding --resync).
+        no_delta = kind == "dryrun"
+        rec_ = dict(sa.as_dict() if sa else {}, during=kind, onboarding=onboarding)
+        prof.update(safety_abort_at=D.iso(now), safety_abort_json=json.dumps(rec_),
+                    safety_delta_requested=0 if no_delta else 1)
+        if onboarding:
+            db.audit("system", "onboarding_safety_abort", uid, {"run_id": run_id, "during": kind})
         db.set_state(uid, D.SAFETY_ABORT, oc.detail[:200])
         alerter.raise_(Alert("safety_abort", "critical",
                              f"{upn}: {sa.summary() if sa else 'safety abort'}; paused. Admin: Restore or Accept deletes",
@@ -485,7 +507,7 @@ def apply_outcome(db: D.DB, alerter: Alerter, s, uid: str, kind: str, run_id: in
                              f"{upn}: Accept-deletes run {'hit the run-time limit' if state == D.ACCEPT_TIMEOUT else 'failed'}"
                              f" ({oc.result}); user stays paused, a new approval is needed", uid), rec)
     if restore and oc.result != R_OK and rclone_started:
-        tonight = u["safety_restore_when"] == D.RESTORE_TONIGHT
+        tonight = u["safety_restore_when"] == D.RESTORE_TONIGHT or not u["onboarding_completed_at"]
         prof["restore_timeouts"] = u["restore_timeouts"] + (oc.result == R_TIMEOUT)
         if oc.result == R_TIMEOUT and not tonight and not u["safety_restore_requeued"]:
             # SPEC v0.4 §9.4.1: a next-slot Restore that hits the 25-min limit is re-queued ONCE as a tonight

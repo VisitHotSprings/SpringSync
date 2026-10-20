@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.5.0 (unreleased, lab build, 2026-10-20). Follows SPEC.md v0.5
+### Changed
+- **Mount-failure counter (§9.4):** only a **successful mount** resets `consecutive_mount_failures`.
+  - `nas_auth` (wrong NAS password) neither counts nor resets it, and stays its own failure: under Option A
+    it pauses at once (`nas_auth_failed`) with no retries and its own alert. Mount fail → `nas_auth` → mount
+    fail still alerts.
+  - An internal error after a good mount resets the counter. One before the mount (e.g. credential read)
+    does not, and is outside the same-error chain.
+- **Tonight-run start cutoff (§9.4.1):** a tonight Restore (admin's choice or the automatic re-queue)
+  starts only if at least 30 minutes remain before 07:00 CT (`TONIGHT_MIN_REMAINING_S`); otherwise it waits
+  for the next night. The deferral is audited (`safety_restore_tonight_deferred`, minutes left) and raises a
+  low `restore_deferred` alert, once per night (`tonight_held_at` dedupes the 60 s tick). The approval is
+  kept. Tonight Restores are now bound by `resync_hours` only, not by `active_hours`.
+- **Safety abort during onboarding (§6.1 step 8):**
+  - New `onboarding_completed_at`: set by the first successful normal bisync after the onboarding
+    `--resync` (audit `onboarding_completed`).
+  - An abort on the onboarding dry run or the first bisync is a normal safety abort (pause, alert), records
+    `during` and `onboarding` in the abort record, audits `onboarding_safety_abort`, and leaves onboarding
+    incomplete.
+  - **Restore re-runs the onboarding `--resync`:** resync window, one at a time, no run-time limit (so no
+    re-queue or cutoff). The admin page says so and offers no next-slot/tonight choice.
+  - An abort on the onboarding **dry run** has no bisync listings, so no delta list is requested and Accept
+    deletes is refused (409); Restore is allowed without a delta list.
+- **Per-side counts (§9.4 wording):** counts come from the `kind=delta` dry run; the log only says which
+  side tripped. This was already the case in 0.4.0; the docs now say so.
+- Version 0.5.0 (User-Agent `…|SpringSync/0.5`).
+
+### Added
+- Migration 5 (expand-only): `onboarding_completed_at` (backfilled from existing successful bisyncs),
+  `tonight_held_at`. Test users created as `active` count as onboarded unless a test says otherwise.
+- Tests: 233 total (55 smoke, 9 integration against real rclone v1.75.2).
+
 ## 0.4.0 (unreleased, lab build, 2026-10-20). Follows SPEC.md v0.4 (Reid's answers to the v0.3 questions)
 ### Changed
 - **Restore run-time limits:**

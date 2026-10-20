@@ -142,7 +142,9 @@ def seed_user(db, kr, *, state=D.ACTIVE, upn="jsmith@hotsprings.org", oid=None, 
         db.put_ms_credential(kr, uid, CANARY_RT, "b!drive123", "business")
     if nas:
         db.put_nas_credential(kr, uid, "A", "jsmith", CANARY_PW)
-    defaults = {"needs_resync": 0, "last_success_at": None} if state == D.ACTIVE else {}
+    # an "active" test user has finished onboarding (SPEC v0.5 §6.1 step 8) unless a test says otherwise
+    defaults = ({"needs_resync": 0, "last_success_at": None, "onboarding_completed_at": "2026-10-01T00:00:00+00:00"}
+                if state == D.ACTIVE else {})
     defaults.update(prof)
     if defaults:
         db.update_profile(uid, **defaults)
