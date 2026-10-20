@@ -119,6 +119,8 @@ def test_safety_delta_list_then_accept_deletes(env):
     assert code == 0 and oc.result == R_OK
     d = parse_deltas(text)
     assert d["counts"]["Path2"] == {"deleted": 3}
+    from odnas.runner import delete_count
+    assert delete_count(d) == 3                          # the count an admin approves (SPEC v0.3 §9.4.1)
     assert sorted(i["name"] for i in d["items"]) == ["f0.txt", "f1.txt", "f2.txt"]
     assert (p1 / "f0.txt").exists()                      # dry run deleted nothing
     code, text, oc = run(c, p1, mnt, 4, force=True)      # one admin-approved Accept-deletes run

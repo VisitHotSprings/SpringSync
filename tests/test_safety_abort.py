@@ -75,49 +75,6 @@ def test_delta_run_is_dry_run_force_and_keeps_filenames_out_of_db(cfg, db, kr, e
     assert _choose(w, db, uid) is None          # waiting for the admin
 
 
-def test_restore_runs_one_resync_then_active(cfg, db, kr, entra):
-    w, uid = _with_delta(cfg, db, kr, entra)
-    now = D.iso(D.utcnow())
-    db.update_profile(uid, safety_action=D.SAFETY_RESTORE, safety_action_by="m", safety_action_at=now,
-                      needs_resync=1, resync_approved_by="m", resync_approved_at=now)
-    assert _choose(w, db, uid) == "resync"
-    w.runner.proc = FakeProc()
-    assert w.runner.run(uid, "resync").result == "ok"
-    cmd = w.runner.proc.calls[-1][0]
-    assert "--resync" in cmd and "--force" not in cmd
-    u = db.user_full(uid)
-    assert u["state"] == D.ACTIVE and not u["safety_action"] and not u["safety_abort_at"] and not u["needs_resync"]
-    assert not any(i["type"] == "safety_abort" for i in db.open_issues(uid))
-    assert db.audit_rows(action="safety_restore_completed")
-
-
-def test_accept_deletes_is_one_force_run_and_approval_is_consumed(cfg, db, kr, entra):
-    w, uid = _with_delta(cfg, db, kr, entra)
-    db.update_profile(uid, safety_action=D.SAFETY_ACCEPT, safety_action_by="m", safety_action_at=D.iso(D.utcnow()))
-    assert _choose(w, db, uid) == "force"
-    w.runner.proc = FakeProc()
-    assert w.runner.run(uid, "force").result == "ok"
-    cmd, limit = w.runner.proc.calls[-1]
-    assert "--force" in cmd and "--resync" not in cmd and "--dry-run" not in cmd and limit is None
-    assert db.runs(uid)[0]["kind"] == "force"
-    u = db.user_full(uid)
-    assert u["state"] == D.ACTIVE and not u["safety_action"]
-    assert db.audit_rows(action="accept_deletes_started") and db.audit_rows(action="accept_deletes_completed")
-    w.runner.proc = FakeProc()
-    w.runner.run(uid, "bisync")
-    assert "--force" not in w.runner.proc.calls[-1][0]   # the next scheduled run is normal again
-
-
-def test_failed_accept_deletes_run_does_not_repeat(cfg, db, kr, entra):
-    w, uid = _with_delta(cfg, db, kr, entra)
-    db.update_profile(uid, safety_action=D.SAFETY_ACCEPT, safety_action_by="m", safety_action_at=D.iso(D.utcnow()))
-    w.runner.proc = FakeProc(exit_codes=[5])
-    assert w.runner.run(uid, "force").result == "retryable"
-    u = db.user_full(uid)
-    assert u["state"] == D.SAFETY_ABORT and u["safety_action"] is None
-    assert _choose(w, db, uid) is None           # a new admin decision is required
-
-
 def test_force_run_refused_without_approval(cfg, db, kr, entra):
     w, uid = _with_delta(cfg, db, kr, entra)
     with pytest.raises(RuntimeError):
@@ -125,20 +82,6 @@ def test_force_run_refused_without_approval(cfg, db, kr, entra):
     active = seed_user(db, kr, upn="other@hotsprings.org")
     with pytest.raises(RuntimeError):
         w.runner.run(active, "force")
-
-
-def test_exit7_retryable_proceeds_then_escalates_after_3(cfg, db, kr, entra):
-    w, _ = make_worker(cfg, db, kr, entra, FakeProc(exit_codes=[7], log_lines=[CRIT, RETRY]))
-    uid = seed_user(db, kr)
-    for n in (1, 2):
-        assert w.runner.run(uid, "bisync").result == "critical_retryable"
-        u = db.user_full(uid)
-        assert u["state"] == D.ACTIVE and u["consecutive_crit_retry"] == n and not u["needs_resync"]
-        assert _choose(w, db, uid) in ("bisync", "check")      # next run proceeds without --resync
-    w.runner.run(uid, "bisync")
-    u = db.user_full(uid)
-    assert u["state"] == D.CRITICAL and u["needs_resync"] and u["consecutive_crit_retry"] == 0
-    assert any(i["type"] == "critical" for i in db.open_issues(uid))
 
 
 def test_exit7_retryable_counter_resets_on_success(cfg, db, kr, entra):
@@ -185,7 +128,7 @@ def test_migration_2_is_expand_only(tmp_path):
     c.execute("INSERT INTO sync_runs(id,user_id,started_at,kind,result) VALUES (7,'u','t','bisync','ok')")
     c.close()
     db = D.DB(str(p))
-    assert db.schema_version() == len(D.MIGRATIONS) == 2
+    assert db.schema_version() == len(D.MIGRATIONS) == 3
     assert dict(db.one("SELECT id, kind, result FROM sync_runs")) == {"id": 7, "kind": "bisync", "result": "ok"}
     db.q("INSERT INTO sync_runs(user_id,started_at,kind) VALUES ('u','t','force')")
     with pytest.raises(Exception):

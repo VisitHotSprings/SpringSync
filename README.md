@@ -156,7 +156,7 @@ sudo REPO_URL=git@github.com:<OWNER>/<REPO>.git TENANT_ID=... CLIENT_ID=... \
      GROUP_USERS=... GROUP_ADMINS=... GROUP_AUDITORS=... \
      SYNC_HOST=sync.hotsprings.org GCP_ACME_PROJECT=... ACME_ZONE=... \
      LAN_CIDRS="10.0.0.0/16" ADMIN_CIDR="10.0.10.0/24" LOG_READERS="walter" \
-     ./deploy/install.sh --version v0.2.0           # add --dry-run to see the plan first
+     ./deploy/install.sh --version v0.3.0           # add --dry-run to see the plan first
 ```
 `install.sh` is idempotent: every step checks state first, and it never overwrites keys, the DB, or settings.
 It handles:

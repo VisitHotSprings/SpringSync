@@ -245,7 +245,7 @@ def _safety_user(db, kr, cfg, delta=True):
         safety_delta_requested=0 if delta else 1)
     if delta:
         db.update_profile(uid, safety_delta_at=D.iso(D.utcnow()), safety_delta_summary="NAS: 4 deleted")
-        write_private(delta_file(cfg, uid), _j.dumps({"counts": {}, "truncated": False, "items": [
+        write_private(delta_file(cfg, uid), _j.dumps({"counts": {"Path1": {}, "Path2": {"deleted": 1}}, "truncated": False, "items": [
             {"side": "Path2", "where": "NAS", "event": "deleted", "name": "Payroll/SECRET-NAME.xlsx"}]}))
     return uid
 
@@ -274,16 +274,35 @@ def test_safety_restore_requires_delta_then_approves_and_audits(app, entra, db, 
                      data={"csrf": tok, "confirm": "victim@hotsprings.org"}).status_code == 409
 
 
-def test_safety_accept_deletes_requires_upn_confirmation(app, entra, db, kr, cfg):
+def test_safety_accept_deletes_requires_upn_and_current_count(app, entra, db, kr, cfg):
     mark = login(app, entra, oid="m", upn="mark@hotsprings.org", groups=(G_ADMINS,))
     uid = _safety_user(db, kr, cfg)
     tok = csrf(mark, "/admin")
-    assert mark.post(f"/admin/users/{uid}/safety-accept-deletes", data={"csrf": tok, "confirm": "x"}).status_code == 400
+    url = f"/admin/users/{uid}/safety-accept-deletes"
+    assert mark.post(url, data={"csrf": tok, "confirm": "x", "approved_deletes": "1"}).status_code == 400
+    assert mark.post(url, data={"csrf": tok, "confirm": "victim@hotsprings.org"}).status_code == 400
+    # stale page: the admin saw a different count than the current delta list
+    assert mark.post(url, data={"csrf": tok, "confirm": "victim@hotsprings.org", "approved_deletes": "7"}).status_code == 409
     assert db.user_full(uid)["safety_action"] is None
-    assert mark.post(f"/admin/users/{uid}/safety-accept-deletes",
-                     data={"csrf": tok, "confirm": "victim@hotsprings.org"}).status_code == 303
-    assert db.user_full(uid)["safety_action"] == D.SAFETY_ACCEPT
-    assert db.audit_rows(action="admin_safety_accept_deletes")
+    assert mark.post(url, data={"csrf": tok, "confirm": "victim@hotsprings.org", "approved_deletes": "1"}).status_code == 303
+    u = db.user_full(uid)
+    assert (u["safety_action"], u["safety_approved_deletes"], u["safety_accept_state"]) == (D.SAFETY_ACCEPT, 1, "pending")
+    det = __import__("json").loads(db.audit_rows(action="admin_safety_accept_deletes")[0]["details_json"])
+    assert det["approved_deletes"] == 1 and det["expires_at"]
+    page = mark.get(f"/admin/users/{uid}").text
+    assert "expires" in page and "Accept 1 deletes approved by m" in page
+
+
+def test_safety_restore_next_slot_or_tonight(app, entra, db, kr, cfg):
+    mark = login(app, entra, oid="m", upn="mark@hotsprings.org", groups=(G_ADMINS,))
+    uid = _safety_user(db, kr, cfg)
+    tok = csrf(mark, "/admin")
+    assert mark.post(f"/admin/users/{uid}/safety-restore", data={"csrf": tok, "when": "someday"}).status_code == 400
+    assert mark.post(f"/admin/users/{uid}/safety-restore", data={"csrf": tok, "when": "tonight"}).status_code == 303
+    assert db.user_full(uid)["safety_restore_when"] == D.RESTORE_TONIGHT
+    det = __import__("json").loads(db.audit_rows(action="admin_safety_restore")[0]["details_json"])
+    assert det["when"] == "tonight"
+    assert "tonight, in the resync window" in mark.get(f"/admin/users/{uid}").text
 
 
 def test_safety_actions_refused_for_users_not_in_safety_abort(app, entra, db, kr):
@@ -295,12 +314,38 @@ def test_safety_actions_refused_for_users_not_in_safety_abort(app, entra, db, kr
     assert mark.post(f"/admin/users/{uid}/no-such-action", data={"csrf": tok}).status_code == 404
 
 
-def test_admin_page_shows_delta_list_and_buttons(app, entra, db, kr, cfg):
+def test_admin_page_links_to_list_but_does_not_show_file_names(app, entra, db, kr, cfg):
     mark = login(app, entra, oid="m", upn="mark@hotsprings.org", groups=(G_ADMINS,))
     uid = _safety_user(db, kr, cfg)
     page = mark.get(f"/admin/users/{uid}").text
-    assert "Payroll/SECRET-NAME.xlsx" in page and "4 of 21" in page
+    assert "Payroll/SECRET-NAME.xlsx" not in page and "4 of 21" in page
+    assert f"/admin/users/{uid}/safety-delta" in page
     assert f"/admin/users/{uid}/safety-restore" in page and f"/admin/users/{uid}/safety-accept-deletes" in page
+    assert not db.audit_rows(action="safety_delta_viewed")      # the summary page is not a list view
+
+
+def test_file_list_view_is_admin_only_and_every_view_audited(app, entra, db, kr, cfg):
+    import json as _j
+    mark = login(app, entra, oid="m", upn="mark@hotsprings.org", groups=(G_ADMINS,))
+    uid = _safety_user(db, kr, cfg)
+    for _ in range(2):
+        r = mark.get(f"/admin/users/{uid}/safety-delta")
+        assert r.status_code == 200 and "Payroll/SECRET-NAME.xlsx" in r.text and "audit log" in r.text
+    views = db.audit_rows(action="safety_delta_viewed")
+    assert len(views) == 2
+    for v in views:
+        det = _j.loads(v["details_json"])
+        assert v["actor"] == "m" and v["target"] == uid and v["ts"]
+        assert det["viewer_upn"] == "mark@hotsprings.org" and det["user_upn"] == "victim@hotsprings.org"
+        assert "SECRET-NAME" not in v["details_json"]                     # the audit entry has no file names
+    walter = login(app, entra, oid="w", upn="walter@hotsprings.org", groups=(G_AUDIT,))
+    jsmith = login(app, entra)
+    for c in (walter, jsmith):
+        r = c.get(f"/admin/users/{uid}/safety-delta")
+        assert r.status_code == 403 and "SECRET-NAME" not in r.text
+    assert len(db.audit_rows(action="safety_delta_viewed")) == 2
+    assert all("/safety-delta" not in p for p, _ in iter_routes(app) if p.startswith("/audit"))
+    assert "SECRET-NAME" not in walter.get("/audit/log").text and "SECRET-NAME" not in walter.get("/audit/log.csv").text
 
 
 def test_auditor_cannot_use_or_see_safety_actions(app, entra, db, kr, cfg):

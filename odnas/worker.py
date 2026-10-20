@@ -21,7 +21,7 @@ from odnas.crypto import Keyring
 from odnas.entra import EntraClient
 from odnas.nas import MountHelperClient, NasAccessProvider, provider_from_settings
 from odnas.notify import Alert, Alerter, Notifier
-from odnas.runner import JobRunner, ProcessRunner, sweep_runtime
+from odnas.runner import JobRunner, ProcessRunner, accept_expired, expire_accept_approvals, sweep_runtime
 from odnas.scheduler import ThrottleGovernor, assign_offsets, in_window, weekly_check_due
 from odnas.tokens import BrokerTokenStrategy, TmpfsConfigStrategy, TokenBroker
 
@@ -123,8 +123,12 @@ class Worker:
                 nxt = D.parse_iso(u["next_run_at"])
                 return "delta" if nxt is None or nxt <= now else None
             if u["safety_action"] == D.SAFETY_RESTORE and u["safety_action_by"] and approved:
+                # SPEC v0.3 §9.4.1: next slot by default; "Run tonight" waits for resync_hours
+                if u["safety_restore_when"] == D.RESTORE_TONIGHT and not resync_ok:
+                    return None
                 return "resync"
-            if u["safety_action"] == D.SAFETY_ACCEPT and u["safety_action_by"]:
+            if u["safety_action"] == D.SAFETY_ACCEPT and u["safety_action_by"] \
+                    and u["safety_approved_deletes"] is not None and not accept_expired(u, now):
                 return "force"
             return None
         if st != D.ACTIVE:
@@ -148,6 +152,7 @@ class Worker:
             if u["slot_offset_min"] != offsets[u["id"]]:
                 self.db.update_profile(u["id"], slot_offset_min=offsets[u["id"]])
         self._staleness(users, s, now)
+        expire_accept_approvals(self.db, self.alerter, s, now)
         if self.draining():
             return []
         cap = self.governor.max_concurrent(now, s.max_concurrent)
@@ -161,8 +166,12 @@ class Worker:
             kind = self.choose_job(u, s, now)
             if not kind:
                 continue
-            if kind == "resync" and any(k == "resync" for k in list(running.values()) + [k for _, k in started]):
-                continue  # initial/approved resync: one user at a time (SPEC §9.1)
+            next_slot_restore = (kind == "resync" and u["state"] == D.SAFETY_ABORT
+                                 and u["safety_restore_when"] != D.RESTORE_TONIGHT)
+            if kind == "resync" and not next_slot_restore and \
+                    any(k == "resync" for k in list(running.values()) + [k for _, k in started]):
+                continue  # initial/approved resync: one user at a time (SPEC §9.1); a next-slot Restore
+                #           (SPEC v0.3 §9.4.1) only obeys max_concurrent
             started.append((u["id"], kind))
             self._submit(u["id"], kind)
         if wait:

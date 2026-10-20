@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Idempotent installer for a fresh Ubuntu Server 24.04 LTS amd64 (SPEC §11.2). Run as root.
 #
-#   sudo ./install.sh --version v0.2.0 [--dry-run] [--slug springsync]
+#   sudo ./install.sh --version v0.3.0 [--dry-run] [--slug springsync]
 #
 # Re-running converges. It never overwrites existing keys, the DB, or settings.
 # Inputs (env vars, or prompted when interactive and the bootstrap toml is missing):

@@ -115,6 +115,16 @@ class Outcome:
     auth: str = AUTH_OK      # needs_reauth / blocked_by_ca when result == auth
     safety: SafetyAbort | None = None
     warning: str = ""        # classifier warning (code/text mismatch), logged by the caller
+    crit_error: str = ""     # normalised "Bisync critical error: <err>" (SPEC v0.3 same-error rule)
+    access_failed: bool = False   # log had "Access test failed:" (SPEC v0.3: escalate immediately)
+
+
+def normalise_crit_error(err: str) -> str:
+    """Comparable form of the <err> in "Bisync critical error: <err>": first line, digits -> #,
+    whitespace collapsed, lower-case. Counts and run-specific numbers must not make two
+    occurrences of the same error look different."""
+    first = (err.splitlines() or [""])[0]
+    return re.sub(r"\s+", " ", re.sub(r"\d+", "#", first)).strip().lower()[:300]
 
 
 @dataclass
@@ -221,7 +231,8 @@ def classify(exit_code: int | None, log_text: str, *, timed_out: bool = False, b
         return Outcome(R_CRITICAL, f"bisync critical error, listings locked out{why}; admin must approve resync")
     # 4. retryable critical (--resilient)
     if exit_code == 7 and retryable_text:
-        return Outcome(R_CRIT_RETRY, f"bisync aborted, retryable under --resilient{why}; next run proceeds")
+        return Outcome(R_CRIT_RETRY, f"bisync aborted, retryable under --resilient{why}; next run proceeds",
+                       crit_error=normalise_crit_error(crit_err), access_failed=access)
     # 6 (mismatches) before 5, so a code that looks harmless can't hide critical text
     if exit_code == 7:
         return Outcome(R_CRITICAL, f"exit 7 without a recognised abort message{why}; admin must approve resync",

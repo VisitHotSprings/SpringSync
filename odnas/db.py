@@ -27,6 +27,11 @@ SAFETY_ABORT = "safety_abort"          # SPEC v0.2 §9.4: paused until an admin 
 STATES = (INVITED, ONBOARDING, ACTIVE, PAUSED, NEEDS_REAUTH, NAS_AUTH_FAILED, BLOCKED_BY_CA, CRITICAL,
           SAFETY_ABORT, OFFBOARDING, REMOVED)
 SAFETY_RESTORE, SAFETY_ACCEPT = "restore", "accept_deletes"
+# SPEC v0.3 §9.4.1 Accept-deletes approval states (shown on the admin page)
+ACCEPT_PENDING, ACCEPT_EXPIRED, ACCEPT_CANCELLED = "pending", "expired", "cancelled_count_changed"
+ACCEPT_PRECHECK_FAILED, ACCEPT_TIMEOUT, ACCEPT_FAILED, ACCEPT_DONE = "precheck_failed", "timeout", "failed", "done"
+ACCEPT_TTL_HOURS = 24
+RESTORE_NEXT_SLOT, RESTORE_TONIGHT = "next_slot", "tonight"
 STATE_LABELS = {
     INVITED: "Invited: sign in to connect",
     ONBOARDING: "Setting up",
@@ -205,6 +210,16 @@ MIGRATIONS: list[str] = [
     DROP TABLE sync_runs;
     ALTER TABLE sync_runs_v2 RENAME TO sync_runs;
     CREATE INDEX sync_runs_user ON sync_runs(user_id, id DESC);
+    """,
+    # 3: SPEC v0.3 §9.4 / §9.4.1. Expand-only (new nullable/defaulted columns).
+    """
+    ALTER TABLE sync_profiles ADD COLUMN last_crit_error TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN safety_restore_when TEXT
+        CHECK (safety_restore_when IN ('next_slot','tonight'));
+    ALTER TABLE sync_profiles ADD COLUMN safety_approved_deletes INTEGER;
+    ALTER TABLE sync_profiles ADD COLUMN safety_accept_state TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN safety_accept_state_at TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN restore_timeouts INTEGER NOT NULL DEFAULT 0;
     """,
 ]
 

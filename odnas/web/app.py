@@ -31,7 +31,7 @@ from odnas.crypto import Keyring
 from odnas.db import pack, unpack
 from odnas.entra import EntraClient
 from odnas.nas import V_ERROR, friendly, local_name_from_upn
-from odnas.runner import delta_file
+from odnas.runner import delete_count, delta_file
 from odnas.scheduler import LOCAL_TZ
 from odnas.status import credential_expiry, disk_free_pct, worker_alive
 
@@ -380,20 +380,49 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
                       nas=db.nas_credential_meta(uid), ms=db.ms_credential(uid), admin=True,
                       safety=_safety_view(u, with_delta=True))
 
+    def _delta_doc(uid: str) -> dict | None:
+        f = delta_file(cfg, uid)
+        return json.loads(f.read_text()) if f.exists() else None
+
     def _safety_view(u, with_delta: bool) -> dict | None:
-        """Counts for everyone with access; the delta list (filenames) only for the IT-admin page."""
+        """Counts and decision state only (no file names) for admins and auditors alike. The file list
+        has its own admin-only, audited page (SPEC v0.3 §14.13)."""
         if not u["safety_abort_at"]:
             return None
+        at = D.parse_iso(u["safety_action_at"])
         v = {"abort": json.loads(u["safety_abort_json"] or "{}"), "at": u["safety_abort_at"],
              "delta_at": u["safety_delta_at"], "delta_summary": u["safety_delta_summary"],
              "delta_pending": bool(u["safety_delta_requested"]), "action": u["safety_action"],
-             "action_by": u["safety_action_by"], "action_at": u["safety_action_at"], "entries": [], "truncated": False}
+             "action_by": u["safety_action_by"], "action_at": u["safety_action_at"],
+             "restore_when": u["safety_restore_when"], "approved_deletes": u["safety_approved_deletes"],
+             "accept_state": (D.ACCEPT_PENDING if u["safety_action"] == D.SAFETY_ACCEPT else u["safety_accept_state"]),
+             "accept_state_at": u["safety_accept_state_at"], "restore_timeouts": u["restore_timeouts"],
+             "expires_at": D.iso(at + timedelta(hours=D.ACCEPT_TTL_HOURS))
+             if at and u["safety_action"] == D.SAFETY_ACCEPT else None,
+             "delete_count": None, "has_list": False}
         if with_delta and u["safety_delta_at"]:
-            f = delta_file(cfg, u["id"])
-            if f.exists():
-                d = json.loads(f.read_text())
-                v["entries"], v["truncated"] = d.get("items", [])[:500], d.get("truncated") or len(d.get("items", [])) > 500
+            d = _delta_doc(u["id"])
+            if d is not None:
+                v["delete_count"], v["has_list"] = delete_count(d), True
         return v
+
+    @adm.get("/users/{uid}/safety-delta", response_class=HTMLResponse)
+    def admin_safety_delta(uid: str, request: Request, sess: dict = Depends(admin_dep)):
+        """The safety-abort file list. IT admins only; every view is audited (SPEC v0.3 §14.13: until
+        Walter signs off on admins seeing file names)."""
+        u = db.user_full(uid)
+        if not u or not u["safety_delta_at"]:
+            raise HTTPException(404)
+        d = _delta_doc(uid)
+        if d is None:
+            raise HTTPException(404)
+        entries = d.get("items", [])
+        db.audit(sess["oid"], "safety_delta_viewed", uid,
+                 {"viewer_upn": sess["upn"], "user_upn": u["upn"], "entries": len(entries),
+                  "delta_at": u["safety_delta_at"]})
+        return render(request, "safety_delta.html", sess, u=u, entries=entries[:500],
+                      truncated=bool(d.get("truncated")) or len(entries) > 500, summary=u["safety_delta_summary"],
+                      delete_count=delete_count(d))
 
     @adm.post("/users/{uid}/{action}")
     async def admin_user_action(uid: str, action: str, request: Request, sess: dict = Depends(admin_dep)):
@@ -440,12 +469,30 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
             now = D.iso(D.utcnow())
             details.update(abort=json.loads(u["safety_abort_json"] or "{}"), delta=u["safety_delta_summary"])
             if action == "safety-restore":
+                when = str(form.get("when") or D.RESTORE_NEXT_SLOT)
+                if when not in (D.RESTORE_NEXT_SLOT, D.RESTORE_TONIGHT):
+                    raise HTTPException(400, "Choose 'next slot' or 'tonight'.")
                 db.update_profile(uid, safety_action=D.SAFETY_RESTORE, safety_action_by=actor, safety_action_at=now,
-                                  needs_resync=1, resync_approved_by=actor, resync_approved_at=now)
+                                  safety_restore_when=when, needs_resync=1, resync_approved_by=actor,
+                                  resync_approved_at=now, safety_accept_state=None, safety_accept_state_at=None)
+                details["when"] = when
             else:
                 if form.get("confirm") != u["upn"]:
                     raise HTTPException(400, "Type the user's UPN to confirm Accept deletes.")
-                db.update_profile(uid, safety_action=D.SAFETY_ACCEPT, safety_action_by=actor, safety_action_at=now)
+                d = _delta_doc(uid)
+                if d is None:
+                    raise HTTPException(409, "The dry-run delta list is missing; refresh it first.")
+                n = delete_count(d)
+                try:
+                    shown = int(str(form.get("approved_deletes", "")))
+                except ValueError:
+                    raise HTTPException(400, "Missing delete count.") from None
+                if shown != n:   # the page the admin looked at is stale
+                    raise HTTPException(409, f"The delete count changed ({shown} shown, {n} now). Reload and review.")
+                db.update_profile(uid, safety_action=D.SAFETY_ACCEPT, safety_action_by=actor, safety_action_at=now,
+                                  safety_approved_deletes=n, safety_accept_state=D.ACCEPT_PENDING,
+                                  safety_accept_state_at=now)
+                details.update(approved_deletes=n, expires_at=D.iso(D.utcnow() + timedelta(hours=D.ACCEPT_TTL_HOURS)))
         elif action == "safety-refresh-delta":
             if u["safety_action"]:
                 raise HTTPException(409, f"Already approved: {u['safety_action']}.")

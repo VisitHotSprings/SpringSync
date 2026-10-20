@@ -1,0 +1,10 @@
+{% extends "base.html" %}{% block body %}
+<h1>Safety-abort file list: {{ u.upn }}</h1>
+<p class="warn">Visible to IT admins only. This view has been recorded in the audit log (pending Walter's sign-off, SPEC §14.13).</p>
+<p>Dry run {{ u.safety_delta_at|local }}: {{ summary }}. Deletes that <strong>Accept deletes</strong> would apply: <strong>{{ delete_count }}</strong>.</p>
+<table><tr><th>Side</th><th>Change</th><th>Path</th></tr>
+{% for i in entries %}<tr><td>{{ i.where }}</td><td>{{ i.event }}</td><td>{{ i.name }}</td></tr>{% else %}<tr><td colspan="3">no entries</td></tr>{% endfor %}
+</table>
+{% if truncated %}<p>List truncated.</p>{% endif %}
+<p><a href="/admin/users/{{ u.id }}">Back</a></p>
+{% endblock %}
