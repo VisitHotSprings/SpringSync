@@ -1,0 +1,6 @@
+{% extends "base.html" %}{% block body %}
+<h1>{{ product }}</h1>
+<p>Keeps your OneDrive and your NAS home folder in sync. Sign in with your Visit Hot Springs Microsoft account to connect or check your status.</p>
+<p><a href="/login"><button>Sign in with Microsoft</button></a></p>
+{% if sess %}<p class="msg">You're signed in, but you don't have access yet. During the pilot, IT has to add you to the pilot list.</p>{% endif %}
+{% endblock %}

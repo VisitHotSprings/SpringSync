@@ -1,0 +1,118 @@
+#!/usr/bin/python3 -I
+# @SLUG@ mount helper (SPEC §3, §7.4). Installed root:root 0755 at
+# /usr/local/lib/@SLUG@/mount-helper and allowed via sudoers for the service
+# user ONLY with no extra arguments beyond: mount|umount|verify <uuid>.
+#
+# It never takes paths, hosts, or options from the command line. It reads the UNC
+# and credentials from files the service user wrote to /run/@SLUG@/creds/<uuid>
+# (must be regular, not symlinks, owned by the service user, mode 0600) and
+# mounts with a FIXED option set. Exit codes: 0 ok, 2 usage, 3 other mount error,
+# 4 NAS unreachable, 13 logon failure (no retry: avoid NAS lockout).
+import os
+import pwd
+import re
+import stat
+import subprocess
+import sys
+
+SLUG = "@SLUG@"
+SERVICE_USER = "@SLUG@"
+RUN = f"/run/{SLUG}/creds"
+MNT = f"/srv/{SLUG}/mnt"
+VERIFY = f"/srv/{SLUG}/verify"
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+UNC_RE = re.compile(r"^//[A-Za-z0-9.-]{1,253}/[A-Za-z0-9][A-Za-z0-9 _.-]{0,79}$")
+OK, USAGE, OTHER, UNREACHABLE, AUTH = 0, 2, 3, 4, 13
+
+
+def die(code, msg):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def read_owned(path, svc_uid):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as e:
+        die(USAGE, f"cannot open {path}: {e.strerror}")
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != svc_uid or stat.S_IMODE(st.st_mode) != 0o600:
+        os.close(fd)
+        die(USAGE, f"{path}: must be a regular 0600 file owned by {SERVICE_USER}")
+    with os.fdopen(fd) as f:
+        return f.read()
+
+
+def mount_options(svc, cred_path, read_only):
+    opts = ["vers=3.1.1", "seal", f"uid={svc.pw_uid}", f"gid={svc.pw_gid}", "file_mode=0600", "dir_mode=0700",
+            "nosuid", "nodev", "noexec", f"credentials={cred_path}", "noserverino"]
+    opts.append("ro" if read_only else "rw")
+    return ",".join(opts)
+
+
+def classify(rc, err):
+    e = err.lower()
+    if "error(13)" in e or "logon_failure" in e or "logon failure" in e or "permission denied" in e:
+        return AUTH
+    if any(s in e for s in ("error(112)", "error(113)", "error(115)", "host is down", "no route", "timed out",
+                            "could not resolve", "unable to find suitable address")):
+        return UNREACHABLE
+    return OTHER if rc else OK
+
+
+def do_mount(ident, svc, read_only, base):
+    cred_path, unc_path = f"{RUN}/{ident}", f"{RUN}/{ident}.unc"
+    read_owned(cred_path, svc.pw_uid)
+    unc = read_owned(unc_path, svc.pw_uid).strip()
+    if not UNC_RE.match(unc):
+        die(USAGE, "invalid UNC")
+    target = f"{base}/{ident}"
+    os.makedirs(target, mode=0o700, exist_ok=True)
+    os.chown(target, svc.pw_uid, svc.pw_gid)
+    if os.path.ismount(target):
+        return OK  # Option B persistent mount already up
+    p = subprocess.run(["/usr/bin/mount", "-t", "cifs", unc, target, "-o", mount_options(svc, cred_path, read_only)],
+                       capture_output=True, text=True, timeout=60)
+    code = classify(p.returncode, p.stderr + p.stdout)
+    if code != OK:
+        print(f"mount failed rc={p.returncode}: {(p.stderr or p.stdout).strip()[:300]}", file=sys.stderr)
+    return code
+
+
+def do_umount(ident, base):
+    target = f"{base}/{ident}"
+    if os.path.ismount(target):
+        p = subprocess.run(["/usr/bin/umount", target], capture_output=True, text=True, timeout=60)
+        if p.returncode != 0:
+            subprocess.run(["/usr/bin/umount", "-l", target], capture_output=True, timeout=60)
+    try:
+        os.rmdir(target)
+    except OSError:
+        pass
+    return OK
+
+
+def main(argv):
+    if os.geteuid() != 0:
+        die(USAGE, "must run as root via sudo")
+    if len(argv) != 3 or argv[1] not in ("mount", "umount", "verify") or not UUID_RE.match(argv[2]):
+        die(USAGE, "usage: mount-helper mount|umount|verify <uuid>")
+    action, ident = argv[1], argv[2]
+    svc = pwd.getpwnam(SERVICE_USER)
+    if action == "mount":
+        return do_mount(ident, svc, False, MNT)
+    if action == "umount":
+        return do_umount(ident, MNT)
+    code = do_mount(ident, svc, True, VERIFY)  # verify: ro mount, list root, unmount
+    if code == OK:
+        try:
+            os.listdir(f"{VERIFY}/{ident}")
+        except OSError as e:
+            print(f"list failed: {e.strerror}", file=sys.stderr)
+            code = AUTH if e.errno == 13 else OTHER
+    do_umount(ident, VERIFY)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

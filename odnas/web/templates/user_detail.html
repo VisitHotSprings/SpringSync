@@ -1,0 +1,30 @@
+{% extends "base.html" %}{% block body %}
+<h1>{{ u.upn }}</h1>
+<table>
+<tr><th>State</th><td>{{ labels[u.state] }} {% if u.pause_reason %}({{ u.pause_reason }}){% endif %}</td></tr>
+<tr><th>Needs resync</th><td>{{ 'yes' if u.needs_resync else 'no' }}{% if u.resync_approved_by %}, approved by {{ u.resync_approved_by }} {{ u.resync_approved_at|local }}{% endif %}</td></tr>
+<tr><th>Dry run</th><td>{{ u.dryrun_summary or '-' }} {{ u.dryrun_ok_at|local if u.dryrun_ok_at else '' }}</td></tr>
+<tr><th>Preflight</th><td>{{ u.preflight_summary or '-' }}</td></tr>
+<tr><th>Microsoft credential</th><td>{% if ms %}stored; last refresh {{ ms.last_refresh_at|local }}{% if ms.last_refresh_error %}; last error {{ ms.last_refresh_error }}{% endif %}{% else %}none{% endif %}</td></tr>
+<tr><th>NAS credential</th><td>{% if nas %}stored (option {{ nas.provider }}); verified {{ nas.verified_at|local }}; failures {{ nas.failure_count }}{% else %}none{% endif %}</td></tr>
+<tr><th>Last success / check</th><td>{{ u.last_success_at|local }} / {{ u.last_check_at|local }}</td></tr>
+<tr><th>Schedule</th><td>offset {{ u.slot_offset_min }} min, backoff x{{ u.backoff_factor }}, next {{ u.next_run_at|local }}</td></tr>
+</table>
+{% if admin %}
+<h2>Actions</h2>
+{% for a, label in [('pause','Pause'),('resume','Resume'),('request-dryrun','Run dry-run again'),('approve-resync','Approve initial sync / resync')] %}
+<form class="inline" method="post" action="/admin/users/{{ u.id }}/{{ a }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button>{{ label }}</button></form>
+{% endfor %}
+<fieldset><legend>Offboard</legend>
+<form method="post" action="/admin/users/{{ u.id }}/offboard"><input type="hidden" name="csrf" value="{{ csrf }}">
+<label><input type="checkbox" name="final_sync"> run one final sync first</label>
+<label>Type the UPN to confirm <input type="text" name="confirm"></label>
+<button>Offboard (erase stored credentials)</button></form>
+<small>Files on the NAS and in OneDrive are not touched.</small></fieldset>
+{% endif %}
+<h2>Open issues</h2><ul>{% for i in issues %}<li>{{ i.type }} ({{ i.severity }}): {{ i.summary }}</li>{% else %}<li>none</li>{% endfor %}</ul>
+<h2>Runs</h2>
+<table><tr><th>Started</th><th>Ended</th><th>Kind</th><th>Exit</th><th>Result</th><th>Copied</th><th>Deleted</th><th>Bytes</th><th>Conflicts</th><th>Errors</th><th>Detail</th></tr>
+{% for r in runs %}<tr><td>{{ r.started_at|local }}</td><td>{{ r.ended_at|local }}</td><td>{{ r.kind }}</td><td>{{ r.exit_code }}</td><td>{{ r.result }}</td><td>{{ r.files_copied }}</td><td>{{ r.files_deleted }}</td><td>{{ r.bytes }}</td><td>{{ r.conflicts }}</td><td>{{ r.errors_count }}</td><td>{{ r.detail }}</td></tr>{% endfor %}
+</table>
+{% endblock %}

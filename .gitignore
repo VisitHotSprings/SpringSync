@@ -1,0 +1,25 @@
+# never commit secrets or local state
+.env
+*.env
+!.env.example
+*.key
+*.key.old
+*.pem
+*.crt
+*.cred
+*.p12
+*.pfx
+id_ed25519*
+gcp-acme-sa.json
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+# python / tooling
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+*.egg-info/

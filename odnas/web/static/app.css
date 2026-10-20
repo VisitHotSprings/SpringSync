@@ -1,0 +1,10 @@
+body{font-family:system-ui,sans-serif;max-width:1100px;margin:1.5rem auto;padding:0 1rem;color:#1d2433}
+header{display:flex;gap:1rem;align-items:center;border-bottom:1px solid #ccd;padding-bottom:.5rem;margin-bottom:1rem}
+header nav{flex:1} header nav a{margin-right:1rem}
+table{border-collapse:collapse;width:100%;margin:.5rem 0 1.5rem}th,td{border-bottom:1px solid #e3e6ee;padding:.35rem .5rem;text-align:left;font-size:.92rem}
+.badge{padding:.1rem .45rem;border-radius:.6rem;font-size:.8rem;background:#e8ecf5}
+.ok{background:#d9f2df}.warning{background:#fff2c6}.critical,.expired,.high{background:#ffd6d6}.unknown{background:#eee}
+.msg{padding:.6rem;border-radius:.4rem;background:#eef4ff;margin:.5rem 0}.err{background:#ffe3e3}
+form.inline{display:inline}label{display:block;margin:.4rem 0}input[type=text],input[type=password],input[type=number],input[type=date],textarea,select{width:22rem;max-width:100%}
+fieldset{margin:1rem 0;border:1px solid #ccd}small{color:#556}
+.readonly{border-left:4px solid #7a8; padding-left:.6rem}

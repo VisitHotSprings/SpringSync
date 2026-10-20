@@ -1,0 +1,43 @@
+{% extends "base.html" %}{% block body %}
+<h1>My sync status</h1>
+{% set m = {'ok':'Saved. Your NAS login works.','auth_failed':'The NAS did not accept that username or password. Nothing was saved.','unreachable':'The NAS could not be reached. Nothing was saved; try again later.','error':'Something went wrong checking the NAS login. Nothing was saved; IT can see the details.','preflight':'Scan requested; it runs within a few minutes.'} %}
+{% if msg %}<p class="msg {{ 'err' if msg in ('auth_failed','unreachable','error') else '' }}">{{ m.get(msg, '') }}</p>{% endif %}
+<table>
+<tr><th>Status</th><td><span class="badge">{{ labels[u.state] }}</span></td></tr>
+<tr><th>Last successful sync</th><td>{{ u.last_success_at|local }}</td></tr>
+<tr><th>Last run</th><td>{{ u.last_run_at|local }} ({{ u.last_result or '-' }})</td></tr>
+<tr><th>Next run</th><td>{{ u.next_run_at|local }}</td></tr>
+<tr><th>Files that can't sync</th><td>{{ u.unsyncable_count }}</td></tr>
+<tr><th>Microsoft</th><td>{% if ms %}connected {{ ms.token_obtained_at|local }}{% else %}not connected{% endif %}
+ &middot; <a href="/login">Reconnect</a></td></tr>
+</table>
+
+{% if nas_option == 'A' %}
+<h2>NAS login</h2>
+<p>{% if nas %}Saved and verified {{ nas.verified_at|local }}{% if nas.last_failure_at %}; <strong>last failed {{ nas.last_failure_at|local }}</strong>{% endif %}.{% else %}Not entered yet.{% endif %}
+Your password is stored encrypted and nobody, including IT, can view it.</p>
+<form method="post" action="/me/nas" autocomplete="off">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<label>NAS username <input type="text" name="username" required maxlength="128"></label>
+<label>NAS password <input type="password" name="password" required maxlength="256"></label>
+<button>{{ 'Replace NAS login' if nas else 'Save NAS login' }}</button></form>
+{% endif %}
+
+<h2>Setup progress</h2>
+<ol>
+<li>Microsoft connected: {{ 'yes' if ms else 'no' }}</li>
+{% if nas_option == 'A' %}<li>NAS login verified: {{ 'yes' if nas else 'no' }}</li>{% endif %}
+<li>File name check: {{ u.preflight_summary or ('running' if u.preflight_requested else 'not yet') }}
+ {% if has_preflight %}&middot; <a href="/me/preflight.json">download the list (only you can see it)</a>{% endif %}
+ <form class="inline" method="post" action="/me/preflight"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Run again</button></form></li>
+<li>Dry run: {{ u.dryrun_summary or 'not yet' }}</li>
+<li>IT approval of first sync: {{ 'approved' if u.resync_approved_by or u.last_success_at else 'waiting' }}</li>
+</ol>
+
+{% if issues %}<h2>Open issues</h2><ul>{% for i in issues %}<li>{{ i.summary }} ({{ i.opened_at|local }})</li>{% endfor %}</ul>{% endif %}
+<h2>Recent runs</h2>
+<table><tr><th>Started</th><th>Kind</th><th>Result</th><th>Copied</th><th>Deleted</th><th>Conflicts</th><th>Errors</th></tr>
+{% for r in runs %}<tr><td>{{ r.started_at|local }}</td><td>{{ r.kind }}</td><td>{{ r.result or 'running' }}</td><td>{{ r.files_copied }}</td><td>{{ r.files_deleted }}</td><td>{{ r.conflicts }}</td><td>{{ r.errors_count }}</td></tr>{% endfor %}
+</table>
+<p><small>To disconnect completely, ask IT to offboard you, and remove the app at myaccount.microsoft.com &rarr; Apps.</small></p>
+{% endblock %}

@@ -1,0 +1,25 @@
+{% extends "base.html" %}{% block body %}
+<h1>Settings</h1>
+{% if msg %}<p class="msg">{{ msg }}</p>{% endif %}{% if err %}<p class="msg err">{{ err }}</p>{% endif %}
+<p><small>Changes apply on the worker's next tick (within 60 s). Every change is audited. Secret fields can only be replaced, never viewed.
+Email delivery is disabled in v0.1 (open decision: alert mail path). Alerts show on the admin page.</small></p>
+<form method="post" action="/admin/settings" autocomplete="off">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+{% set groups = [] %}{% for k, sp in specs.items() %}{% if sp.group not in groups %}{% set _ = groups.append(sp.group) %}{% endif %}{% endfor %}
+{% for g in groups %}<fieldset><legend>{{ g }}</legend>
+{% for k, sp in specs.items() if sp.group == g %}
+<label>{{ sp.label }}<br>
+{% if sp.secret %}<input type="password" name="{{ k }}" placeholder="{{ '*** set (type to replace)' if set_flags[k] else 'not set' }}">
+{% elif k == 'pilot_list' %}<textarea name="{{ k }}" rows="5">{{ s[k] }}</textarea>
+{% elif k in ('pilot_only','smtp_starttls') %}<input type="hidden" name="{{ k }}__present" value="1"><input type="checkbox" name="{{ k }}" {{ 'checked' if s[k] }}>
+{% else %}<input type="text" name="{{ k }}" value="{{ s[k] }}">{% endif %}
+{% if sp.help %}<br><small>{{ sp.help }}</small>{% endif %}
+{% if s.meta.get(k) %}<br><small>changed {{ s.meta[k].updated_at|local }}</small>{% endif %}
+</label>{% endfor %}</fieldset>{% endfor %}
+<button>Save settings</button></form>
+
+<fieldset><legend>Test NAS login (your own test credential; never stored)</legend>
+<form method="post" action="/admin/settings/nas-test" autocomplete="off"><input type="hidden" name="csrf" value="{{ csrf }}">
+<label>Username <input type="text" name="username"></label><label>Password <input type="password" name="password"></label>
+<button>Test</button></form></fieldset>
+{% endblock %}

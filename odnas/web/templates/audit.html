@@ -1,0 +1,5 @@
+{% extends "base.html" %}{% block body %}
+<h1>Auditor view</h1>
+<p class="readonly">Read-only. No file names, file contents, tokens, or passwords are shown here.</p>
+{% set base = '/audit' %}{% include "_users.html" %}{% include "_overview.html" %}
+{% endblock %}

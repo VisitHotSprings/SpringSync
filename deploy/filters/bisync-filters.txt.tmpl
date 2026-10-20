@@ -1,0 +1,15 @@
+# bisync filters (SPEC §9.3). Versioned in the repo; the GUI never edits this.
+# Changing it forces a --resync for every user: the worker detects the new MD5
+# and sets needs_resync for all users; an admin must approve each one.
+# "@SLUG@" is replaced with the configured slug when rendered.
+- .@SLUG@-archive/**
+- ~$*
+- .~lock.*
+- desktop.ini
+- Thumbs.db
+- .DS_Store
+- *.tmp
+- /Personal Vault/**
+- .@SLUG@-check-*
+- #recycle/**
+- .snapshot/**
