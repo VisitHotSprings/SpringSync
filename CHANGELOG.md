@@ -35,7 +35,7 @@
   - It refuses a build unless `caddy build-info` shows `v1.1.0` with go.sum hash
     `h1:SDxKxFh7d5Jq2/JPnu9Jv8ErOIdfXmK+Oad0qVzQi80=`, and the same check runs before skipping a rebuild.
   - `GO_SHA256` is pinned to `65efbc80…379b40`, which removes the v0.1 refusal.
-- **Tests:** 185 in total (54 smoke, 8 integration against real rclone v1.75.2). New coverage:
+- **Tests:** 185 in total (55 smoke, 8 integration against real rclone v1.75.2). New coverage:
   - exit 1 safety abort, which also re-trips;
   - the delta list, Accept deletes and Restore end to end;
   - check-access exit 7 that is retryable and recovers;
