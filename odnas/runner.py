@@ -15,6 +15,7 @@ from typing import Callable
 
 from odnas import db as D
 from odnas.bisync import (JobPaths, build_bisync, build_check, build_lsjson, build_touch_check_file, log_path)
+from odnas.classify import (R_CRIT_RETRY, R_SAFETY, R_USAGE, delta_summary, parse_deltas)
 from odnas.classify import (R_AUTH, R_CRITICAL, R_ERROR, R_NAS_AUTH, R_OK, R_RETRY, R_TIMEOUT, Outcome, Stats,
                             classify, parse_json_log)
 from odnas.config import Config
@@ -28,7 +29,7 @@ from odnas.tokens import TokenStrategy, write_private
 
 log = logging.getLogger("odnas.runner")
 
-KINDS = ("bisync", "dryrun", "resync", "check", "preflight")
+KINDS = ("bisync", "dryrun", "resync", "check", "preflight", "delta", "force")
 
 
 @dataclass
@@ -67,6 +68,11 @@ class ProcessRunner:
                 err.close()
 
 
+def delta_file(cfg: Config, uid: str) -> Path:
+    """Safety-abort delta list (contains filenames; 0600; admin page only)."""
+    return Path(cfg.p_state) / "safety" / f"{uid}.json"
+
+
 def rclone_env() -> dict[str, str]:
     """Minimal env: no inherited secrets, no RCLONE_* surprises from the service environment."""
     return {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/nonexistent", "LANG": "C.UTF-8",
@@ -87,6 +93,13 @@ class JobRunner:
         assert kind in KINDS
         s = self.settings_loader()
         u = self.db.user_full(uid)
+        if kind == "force":
+            # SPEC v0.2 §9.4 "Accept deletes" is ONE run: consume the approval before anything can fail,
+            # so a crash, timeout or NAS outage can never turn it into a repeated --force.
+            if u["state"] != D.SAFETY_ABORT or u["safety_action"] != D.SAFETY_ACCEPT or not u["safety_action_by"]:
+                raise RuntimeError("force run without a pending admin 'Accept deletes' approval")
+            self.db.update_profile(uid, safety_action=None, safety_action_by=None, safety_action_at=None)
+            self.db.audit("system", "accept_deletes_started", uid, {"approved_by": u["safety_action_by"]})
         run_id = self.db.start_run(uid, kind, "")
         lp = log_path(self.cfg, uid, run_id)
         Path(lp).parent.mkdir(parents=True, exist_ok=True)
@@ -118,8 +131,11 @@ class JobRunner:
                 cmd, limit = build_check(self.cfg, jp), None
             else:
                 cmd = build_bisync(self.cfg, jp, max_delete_pct=max_del, resync=kind in ("resync", "dryrun"),
-                                   dry_run=kind == "dryrun", bwlimit=s.resync_bwlimit)
-                limit = s.run_time_limit_min * 60 if kind == "bisync" else None
+                                   dry_run=kind in ("dryrun", "delta"), bwlimit=s.resync_bwlimit,
+                                   force=kind in ("delta", "force"))
+                # incremental and the read-only delta list get the time limit; resync and the one-off
+                # Accept-deletes run don't (an interrupted --force run would need a second approval)
+                limit = s.run_time_limit_min * 60 if kind in ("bisync", "delta") else None
             pr = self.proc.run(cmd, env, limit, stderr_path=lp + ".stderr")
             text = Path(lp).read_text(errors="replace") if Path(lp).exists() else ""
             stats = parse_json_log(text)
@@ -129,6 +145,10 @@ class JobRunner:
                 oc = self._check_outcome(pr.exit_code, text)
             else:
                 oc = classify(pr.exit_code, text, timed_out=pr.timed_out, broker_auth=broker_auth, stats=stats)
+                if oc.warning:
+                    log.warning("classifier warning uid=%s run=%s exit=%s: %s", uid, run_id, pr.exit_code, oc.warning)
+            if kind == "delta" and oc.result == R_OK:
+                self._store_delta(uid, text)
             return self._finish(uid, kind, run_id, oc, stats, s, exit_code=pr.exit_code)
         except Exception as e:  # never leave a run row open or secrets behind
             log.exception("job failed uid=%s kind=%s", uid, kind)
@@ -151,6 +171,16 @@ class JobRunner:
         if not local.exists():
             local.write_text(f"{self.cfg.product_name} access check file. Do not delete.\n")
         self.proc.run(build_touch_check_file(self.cfg, f"od-{jp.uid}:", jp.config_path), env, 300)
+
+    def delta_path(self, uid: str) -> Path:
+        return delta_file(self.cfg, uid)
+
+    def _store_delta(self, uid: str, text: str) -> None:
+        """Delta list (has filenames): 0600 file for the admin page; the DB keeps counts only."""
+        d = parse_deltas(text)
+        write_private(self.delta_path(uid), json.dumps(d, indent=1))
+        self.db.update_profile(uid, safety_delta_requested=0, safety_delta_at=D.iso(D.utcnow()),
+                               safety_delta_summary=delta_summary(d))
 
     def _check_outcome(self, exit_code: int | None, text: str) -> Outcome:
         m = re.search(r"(\d+) differences found", text)
@@ -211,16 +241,26 @@ def apply_outcome(db: D.DB, alerter: Alerter, s, uid: str, kind: str, run_id: in
     prof["backoff_factor"] = next_backoff(u["backoff_factor"], st.throttled)
 
     if oc.result == R_OK:
-        prof.update(consecutive_failures=0, consecutive_timeouts=0)
+        prof.update(consecutive_failures=0, consecutive_timeouts=0, consecutive_crit_retry=0)
         alerter.resolve(uid, "repeated_failures", "repeated_timeouts", "nas_unreachable", "stale")
         if kind in ("bisync", "resync"):
             prof["last_success_at"] = D.iso(now)
         if kind == "resync":
             prof.update(needs_resync=0, resync_approved_by=None, resync_approved_at=None)
-            if u["state"] in (D.ONBOARDING, D.CRITICAL):
+            if u["state"] == D.SAFETY_ABORT:
+                prof.update(**_SAFETY_CLEAR)
+                db.audit("system", "safety_restore_completed", uid, {"copied": st.files_copied})
+                alerter.resolve(uid, "safety_abort")
+            if u["state"] in (D.ONBOARDING, D.CRITICAL, D.SAFETY_ABORT):
                 db.set_state(uid, D.ACTIVE)
             alerter.resolve(uid, "critical")
             db.audit("system", "resync_completed", uid)
+        if kind == "force":
+            prof.update(**_SAFETY_CLEAR)
+            if u["state"] == D.SAFETY_ABORT:
+                db.set_state(uid, D.ACTIVE)
+            alerter.resolve(uid, "safety_abort")
+            db.audit("system", "accept_deletes_completed", uid, {"deleted": st.files_deleted})
         if kind == "dryrun":
             prof.update(dryrun_ok_at=D.iso(now),
                         dryrun_summary=f"would copy {st.files_copied}, delete {st.files_deleted}, "
@@ -243,16 +283,30 @@ def apply_outcome(db: D.DB, alerter: Alerter, s, uid: str, kind: str, run_id: in
         if n >= 3:
             alerter.raise_(Alert("repeated_timeouts", "medium", f"{upn}: hit run time limit {n} times in a row", uid),
                            rec)
+    elif oc.result == R_SAFETY:
+        sa = oc.safety
+        prof.update(safety_abort_at=D.iso(now), safety_abort_json=json.dumps(sa.as_dict() if sa else {}),
+                    safety_delta_requested=1, safety_delta_at=None, safety_delta_summary=None,
+                    safety_action=None, safety_action_by=None, safety_action_at=None)
+        db.set_state(uid, D.SAFETY_ABORT, oc.detail[:200])
+        alerter.raise_(Alert("safety_abort", "critical",
+                             f"{upn}: {sa.summary() if sa else 'safety abort'}; paused. Admin: Restore or Accept deletes",
+                             uid), rec)
+    elif oc.result == R_CRIT_RETRY:
+        n = u["consecutive_crit_retry"] + 1
+        prof["consecutive_crit_retry"] = n
+        if n >= 3:   # SPEC §9.4: escalate after 3 in a row (e.g. check file still missing)
+            _critical(db, alerter, rec, u, uid, prof, f"{n} retryable critical aborts in a row: {oc.detail}")
     elif oc.result == R_CRITICAL:
-        prof.update(needs_resync=1, resync_approved_by=None, resync_approved_at=None)
-        if u["state"] != D.ONBOARDING:
-            db.set_state(uid, D.CRITICAL, oc.detail[:200])
-        alerter.raise_(Alert("critical", "critical", f"{upn}: {oc.detail}", uid), rec)
+        _critical(db, alerter, rec, u, uid, prof, oc.detail)
+    elif oc.result == R_USAGE:
+        db.set_state(uid, D.PAUSED, oc.detail[:200])
+        alerter.raise_(Alert("bug", "high", f"{upn}: {oc.detail}", uid), rec)
     elif oc.result == R_ERROR:
         if kind == "check":
             prof["last_check_at"] = D.iso(now)
             alerter.raise_(Alert("check_mismatch", "medium", f"{upn}: {oc.detail}", uid), rec)
-        elif kind in ("dryrun", "preflight"):
+        elif kind in ("dryrun", "preflight", "delta"):
             alerter.raise_(Alert(f"{kind}_failed", "medium", f"{upn}: {kind} failed: {oc.detail}", uid), rec)
         else:
             db.set_state(uid, D.PAUSED, oc.detail[:200])
@@ -279,6 +333,17 @@ def apply_outcome(db: D.DB, alerter: Alerter, s, uid: str, kind: str, run_id: in
     prof["next_run_at"] = D.iso(next_slot(now, interval, u["slot_offset_min"], prof["backoff_factor"]))
     db.update_profile(uid, **prof)
     db.audit("system", f"run_{kind}", uid, {"run_id": run_id, "result": oc.result, "exit_code": exit_code})
+
+
+_SAFETY_CLEAR = dict(safety_abort_at=None, safety_abort_json=None, safety_delta_requested=0, safety_delta_at=None,
+                     safety_delta_summary=None, safety_action=None, safety_action_by=None, safety_action_at=None)
+
+
+def _critical(db: D.DB, alerter: Alerter, rec: list[str], u, uid: str, prof: dict, detail: str) -> None:
+    prof.update(needs_resync=1, resync_approved_by=None, resync_approved_at=None, consecutive_crit_retry=0)
+    if u["state"] != D.ONBOARDING:
+        db.set_state(uid, D.CRITICAL, detail[:200])
+    alerter.raise_(Alert("critical", "critical", f"{u['upn']}: {detail}", uid), rec)
 
 
 def sweep_runtime(cfg: Config) -> int:

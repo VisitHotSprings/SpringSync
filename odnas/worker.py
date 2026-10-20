@@ -113,6 +113,20 @@ class Worker:
             return None
         if st == D.CRITICAL:
             return "resync" if approved and resync_ok else None
+        if st == D.SAFETY_ABORT:
+            # SPEC v0.2 §9.4: paused (a plain bisync would re-trip every slot). Only three things run:
+            # the read-only `--dry-run --force` delta list, an admin-approved Restore (--resync),
+            # or one admin-approved Accept-deletes (--force) run. All respect the active-hours window.
+            if not in_window(now, settings_store.active_window(s)):
+                return None
+            if u["safety_delta_requested"]:
+                nxt = D.parse_iso(u["next_run_at"])
+                return "delta" if nxt is None or nxt <= now else None
+            if u["safety_action"] == D.SAFETY_RESTORE and u["safety_action_by"] and approved:
+                return "resync"
+            if u["safety_action"] == D.SAFETY_ACCEPT and u["safety_action_by"]:
+                return "force"
+            return None
         if st != D.ACTIVE:
             return None  # paused, needs_reauth, nas_auth_failed, blocked_by_ca, removed: no attempts
         if u["needs_resync"]:
@@ -181,13 +195,15 @@ class Worker:
         self.db.crypto_erase(uid)
         shutil.rmtree(Path(self.cfg.p_state) / "bisync" / uid, ignore_errors=True)
         (Path(self.cfg.p_state) / "preflight" / f"{uid}.json").unlink(missing_ok=True)
+        (Path(self.cfg.p_state) / "safety" / f"{uid}.json").unlink(missing_ok=True)
         try:
             self.helper.call("umount", uid)
         except Exception:
             log.exception("umount during offboard failed")
         self.db.update_profile(uid, enabled=0, final_sync_requested=0, next_run_at=None)
         self.db.set_state(uid, D.REMOVED, "offboarded")
-        self.alerter.resolve(uid, "needs_reauth", "nas_auth_failed", "critical", "stale", "repeated_failures")
+        self.alerter.resolve(uid, "needs_reauth", "nas_auth_failed", "critical", "stale", "repeated_failures",
+                             "safety_abort")
         self.db.audit("system", "user_offboarded", uid, {"crypto_erase": True, "final_sync": bool(u["final_sync_requested"])})
 
     # ---- loop ---------------------------------------------------------

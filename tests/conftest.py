@@ -97,15 +97,19 @@ class FakeProc:
     timed_out: bool = False
     stdout: str = "[]"
     calls: list = field(default_factory=list)
+    auto_success: bool = True     # like real rclone: a bisync that exits 0 logs "Bisync successful"
 
     def run(self, cmd, env, timeout_s, capture=False, stderr_path=None):
         from odnas.runner import ProcResult
         self.calls.append((cmd, timeout_s))
+        code = self.exit_codes.pop(0) if len(self.exit_codes) > 1 else self.exit_codes[0]
         if "--log-file" in cmd:
             p = Path(cmd[cmd.index("--log-file") + 1])
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text("\n".join(json.dumps(x) for x in self.log_lines) + "\n")
-        code = self.exit_codes.pop(0) if len(self.exit_codes) > 1 else self.exit_codes[0]
+            lines = list(self.log_lines)
+            if code == 0 and self.auto_success and cmd[1] == "bisync":
+                lines.append({"level": "info", "msg": "Bisync successful"})
+            p.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
         return ProcResult(code, self.timed_out, self.stdout)
 
 

@@ -10,6 +10,30 @@
 <tr><th>Last success / check</th><td>{{ u.last_success_at|local }} / {{ u.last_check_at|local }}</td></tr>
 <tr><th>Schedule</th><td>offset {{ u.slot_offset_min }} min, backoff x{{ u.backoff_factor }}, next {{ u.next_run_at|local }}</td></tr>
 </table>
+{% if safety %}
+<h2>Safety abort</h2>
+<table>
+<tr><th>Blocked</th><td>{{ safety.at|local }}: {% if safety.abort.check == 'max_delete' %}too many deletes on {{ 'OneDrive' if safety.abort.side == 'Path1' else 'the NAS' }} ({{ safety.abort.deletes }} of {{ safety.abort.total }}, limit {{ safety.abort.pct }}%){% else %}all files were changed on {{ 'OneDrive' if safety.abort.side == 'Path1' else 'the NAS' }}{% endif %}</td></tr>
+<tr><th>Dry-run delta</th><td>{% if safety.delta_pending %}being prepared (read-only dry run){% else %}{{ safety.delta_summary or '-' }} {{ safety.delta_at|local if safety.delta_at else '' }}{% endif %}</td></tr>
+<tr><th>Decision</th><td>{% if safety.action %}{{ 'Restore' if safety.action == 'restore' else 'Accept deletes' }} approved by {{ safety.action_by }} {{ safety.action_at|local }}; runs at the next slot{% else %}waiting for IT{% endif %}</td></tr>
+</table>
+{% if admin %}
+<p><strong>Restore</strong> runs one <code>--resync --resync-mode newer</code>: files deleted on one side are copied back from the other.
+<strong>Accept deletes</strong> runs bisync once with <code>--force</code>: the deletions are applied to the other side too (they stay recoverable from the OneDrive recycle bin, the archive folder and NAS snapshots).</p>
+{% if not safety.action and safety.delta_at and not safety.delta_pending %}
+<form class="inline" method="post" action="/admin/users/{{ u.id }}/safety-restore"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Restore (approve resync)</button></form>
+<form class="inline" method="post" action="/admin/users/{{ u.id }}/safety-accept-deletes"><input type="hidden" name="csrf" value="{{ csrf }}">
+<label>Type the UPN to confirm <input type="text" name="confirm"></label><button>Accept deletes (one --force run)</button></form>
+{% endif %}
+{% if not safety.action %}<form class="inline" method="post" action="/admin/users/{{ u.id }}/safety-refresh-delta"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Refresh dry-run delta</button></form>{% endif %}
+{% if safety.entries %}
+<details><summary>Delta list ({{ safety.entries|length }} entries{% if safety.truncated %}, truncated{% endif %}; visible to IT admins only)</summary>
+<table><tr><th>Side</th><th>Change</th><th>Path</th></tr>
+{% for i in safety.entries %}<tr><td>{{ i.where }}</td><td>{{ i.event }}</td><td>{{ i.name }}</td></tr>{% endfor %}
+</table></details>
+{% endif %}
+{% endif %}
+{% endif %}
 {% if admin %}
 <h2>Actions</h2>
 {% for a, label in [('pause','Pause'),('resume','Resume'),('request-dryrun','Run dry-run again'),('approve-resync','Approve initial sync / resync')] %}

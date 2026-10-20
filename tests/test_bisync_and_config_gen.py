@@ -27,6 +27,8 @@ def test_bisync_command_matches_spec(cfg):
               "--suffix-keep-extension", "--use-json-log", "--stats-one-line"):
         assert f in cmd
     assert flag_value(cmd, "--max-lock") == "2m"
+    assert flag_value(cmd, "--color") == "NEVER"          # SPEC v0.2 §9.3
+    assert "--force" not in cmd                            # never on a scheduled run
     assert flag_value(cmd, "--conflict-resolve") == "newer"
     assert flag_value(cmd, "--conflict-loser") == "num"
     assert flag_value(cmd, "--conflict-suffix") == "sync-conflict-{DateOnly}-"
@@ -39,7 +41,7 @@ def test_bisync_command_matches_spec(cfg):
     assert flag_value(cmd, "--retries") == "3" and flag_value(cmd, "--retries-sleep") == "30s"
     assert flag_value(cmd, "--low-level-retries") == "10"
     assert flag_value(cmd, "--transfers") == "4" and flag_value(cmd, "--checkers") == "8"
-    assert flag_value(cmd, "--user-agent") == "NONISV|VisitHotSprings|SpringSync/0.1"
+    assert flag_value(cmd, "--user-agent") == "NONISV|VisitHotSprings|SpringSync/0.2"
     assert flag_value(cmd, "--workdir").endswith(f"/bisync/{UID}")
     assert flag_value(cmd, "--log-file").endswith(f"/runs/{UID}/42.json")
     assert flag_value(cmd, "--filters-file").endswith("bisync-filters.txt")
@@ -121,3 +123,13 @@ def test_rclone_config_tmpfs_fallback_reads_back_rotation(cfg, db, kr):
 def test_config_rejects_injection(cfg):
     with pytest.raises(ValueError):
         render_rclone_config(cfg, UID, "drive\n[evil]", "business", {}, "http://x")
+
+
+def test_force_only_when_asked_and_never_with_resync(cfg):
+    import pytest
+    jp = JobPaths(UID, 1, "/run/x.conf", f"/srv/springsync/mnt/{UID}")
+    assert "--force" in build_bisync(cfg, jp, max_delete_pct=10, force=True)
+    d = build_bisync(cfg, jp, max_delete_pct=10, force=True, dry_run=True)
+    assert "--force" in d and "--dry-run" in d and "--resync" not in d
+    with pytest.raises(ValueError):
+        build_bisync(cfg, jp, max_delete_pct=10, force=True, resync=True)

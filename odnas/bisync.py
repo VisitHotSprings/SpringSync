@@ -46,9 +46,13 @@ def log_path(cfg: Config, uid: str, run_id: int) -> str:
 
 
 def build_bisync(cfg: Config, jp: JobPaths, *, max_delete_pct: int, resync: bool = False, dry_run: bool = False,
-                 bwlimit: str = "") -> list[str]:
+                 bwlimit: str = "", force: bool = False) -> list[str]:
+    """force=True is ONLY for (a) the admin-approved one-off "Accept deletes" run and (b) the read-only
+    `--dry-run --force` delta list after a safety abort (SPEC v0.2 §9.3/§9.4). Never on a scheduled run."""
     if not 1 <= max_delete_pct <= 50:
         raise ValueError("max_delete_pct out of range")
+    if force and resync:
+        raise ValueError("--force is never combined with --resync")
     remote = remote_name(jp.uid)
     path2 = jp.path2()
     cmd = [
@@ -69,7 +73,7 @@ def build_bisync(cfg: Config, jp: JobPaths, *, max_delete_pct: int, resync: bool
         "--retries", "3", "--retries-sleep", "30s", "--low-level-retries", "10",
         "--tpslimit", "4", "--transfers", "4", "--checkers", "8",
         "--user-agent", cfg.user_agent,
-        "--use-json-log", "--log-level", "INFO", "--stats", "1m", "--stats-one-line",
+        "--use-json-log", "--log-level", "INFO", "--color", "NEVER", "--stats", "1m", "--stats-one-line",
         "--log-file", log_path(cfg, jp.uid, jp.run_id),
     ]
     if resync:
@@ -79,6 +83,8 @@ def build_bisync(cfg: Config, jp: JobPaths, *, max_delete_pct: int, resync: bool
     if dry_run:
         cmd.append("--dry-run")
     assert not any(f in cmd for f in FORBIDDEN_FLAGS)
+    if force:
+        cmd.append("--force")
     return cmd
 
 

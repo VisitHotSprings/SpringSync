@@ -23,8 +23,10 @@ from odnas.crypto import Keyring, Sealed
 INVITED, ONBOARDING, ACTIVE, PAUSED = "invited", "onboarding", "active", "paused"
 NEEDS_REAUTH, NAS_AUTH_FAILED, BLOCKED_BY_CA, CRITICAL = "needs_reauth", "nas_auth_failed", "blocked_by_ca", "critical"
 OFFBOARDING, REMOVED = "offboarding", "removed"
+SAFETY_ABORT = "safety_abort"          # SPEC v0.2 §9.4: paused until an admin chooses Restore or Accept deletes
 STATES = (INVITED, ONBOARDING, ACTIVE, PAUSED, NEEDS_REAUTH, NAS_AUTH_FAILED, BLOCKED_BY_CA, CRITICAL,
-          OFFBOARDING, REMOVED)
+          SAFETY_ABORT, OFFBOARDING, REMOVED)
+SAFETY_RESTORE, SAFETY_ACCEPT = "restore", "accept_deletes"
 STATE_LABELS = {
     INVITED: "Invited: sign in to connect",
     ONBOARDING: "Setting up",
@@ -34,6 +36,7 @@ STATE_LABELS = {
     NAS_AUTH_FAILED: "NAS login failed: please re-enter your NAS password",
     BLOCKED_BY_CA: "Blocked by a Microsoft sign-in policy: IT has been alerted",
     CRITICAL: "Stopped safely: IT must review before syncing resumes",
+    SAFETY_ABORT: "Paused: an unusually large number of deletions was blocked; IT is reviewing",
     OFFBOARDING: "Being disconnected",
     REMOVED: "Disconnected",
 }
@@ -166,6 +169,42 @@ MIGRATIONS: list[str] = [
     CREATE TABLE rate_events (bucket TEXT NOT NULL, ts TEXT NOT NULL);
     CREATE INDEX rate_events_b ON rate_events(bucket, ts);
     CREATE TABLE heartbeat (component TEXT PRIMARY KEY, ts TEXT NOT NULL, detail TEXT);
+    """,
+    # 2: SPEC v0.2 §9.4 safety_abort handling. Expand-only: new nullable/defaulted columns, and
+    #    sync_runs.kind gains 'delta' (dry-run --force delta list) and 'force' (one Accept-deletes run).
+    #    The v0.1 code never writes the new kinds/columns, so it still runs against this schema.
+    """
+    ALTER TABLE sync_profiles ADD COLUMN consecutive_crit_retry INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE sync_profiles ADD COLUMN safety_abort_at TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN safety_abort_json TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN safety_delta_requested INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE sync_profiles ADD COLUMN safety_delta_at TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN safety_delta_summary TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN safety_action TEXT CHECK (safety_action IN ('restore','accept_deletes'));
+    ALTER TABLE sync_profiles ADD COLUMN safety_action_by TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN safety_action_at TEXT;
+    CREATE TABLE sync_runs_v2 (
+        id INTEGER PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        started_at TEXT NOT NULL,
+        ended_at TEXT,
+        kind TEXT NOT NULL CHECK (kind IN ('dryrun','resync','bisync','check','preflight','delta','force')),
+        exit_code INTEGER,
+        result TEXT,
+        files_copied INTEGER DEFAULT 0,
+        files_deleted INTEGER DEFAULT 0,
+        bytes INTEGER DEFAULT 0,
+        conflicts INTEGER DEFAULT 0,
+        errors_count INTEGER DEFAULT 0,
+        throttled INTEGER DEFAULT 0,
+        detail TEXT,
+        log_path TEXT
+    );
+    INSERT INTO sync_runs_v2 SELECT id, user_id, started_at, ended_at, kind, exit_code, result, files_copied,
+        files_deleted, bytes, conflicts, errors_count, throttled, detail, log_path FROM sync_runs;
+    DROP TABLE sync_runs;
+    ALTER TABLE sync_runs_v2 RENAME TO sync_runs;
+    CREATE INDEX sync_runs_user ON sync_runs(user_id, id DESC);
     """,
 ]
 

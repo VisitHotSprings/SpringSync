@@ -31,6 +31,7 @@ from odnas.crypto import Keyring
 from odnas.db import pack, unpack
 from odnas.entra import EntraClient
 from odnas.nas import V_ERROR, friendly, local_name_from_upn
+from odnas.runner import delta_file
 from odnas.scheduler import LOCAL_TZ
 from odnas.status import credential_expiry, disk_free_pct, worker_alive
 
@@ -38,6 +39,10 @@ log = logging.getLogger("odnas.web")
 HERE = Path(__file__).resolve().parent
 SESSION_HOURS = 8
 ROLE_USER, ROLE_ADMIN, ROLE_AUDITOR = "user", "admin", "auditor"
+# Every POST /admin/users/{uid}/{action}. IT-admin role only (SpringSync-Admins); auditors get 403.
+ADMIN_USER_ACTIONS = ("pause", "resume", "approve-resync", "request-dryrun", "offboard",
+                      "safety-restore", "safety-accept-deletes", "safety-refresh-delta")
+
 CSP = ("default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; "
        "base-uri 'none'")
 
@@ -372,7 +377,23 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         if not u:
             raise HTTPException(404)
         return render(request, "user_detail.html", sess, u=u, runs=db.runs(uid, 30), issues=db.open_issues(uid),
-                      nas=db.nas_credential_meta(uid), ms=db.ms_credential(uid), admin=True)
+                      nas=db.nas_credential_meta(uid), ms=db.ms_credential(uid), admin=True,
+                      safety=_safety_view(u, with_delta=True))
+
+    def _safety_view(u, with_delta: bool) -> dict | None:
+        """Counts for everyone with access; the delta list (filenames) only for the IT-admin page."""
+        if not u["safety_abort_at"]:
+            return None
+        v = {"abort": json.loads(u["safety_abort_json"] or "{}"), "at": u["safety_abort_at"],
+             "delta_at": u["safety_delta_at"], "delta_summary": u["safety_delta_summary"],
+             "delta_pending": bool(u["safety_delta_requested"]), "action": u["safety_action"],
+             "action_by": u["safety_action_by"], "action_at": u["safety_action_at"], "entries": [], "truncated": False}
+        if with_delta and u["safety_delta_at"]:
+            f = delta_file(cfg, u["id"])
+            if f.exists():
+                d = json.loads(f.read_text())
+                v["entries"], v["truncated"] = d.get("items", [])[:500], d.get("truncated") or len(d.get("items", [])) > 500
+        return v
 
     @adm.post("/users/{uid}/{action}")
     async def admin_user_action(uid: str, action: str, request: Request, sess: dict = Depends(admin_dep)):
@@ -381,6 +402,11 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         if not u:
             raise HTTPException(404)
         actor = sess["oid"]
+        if action not in ADMIN_USER_ACTIONS:
+            raise HTTPException(404)
+        details: dict = {"upn": u["upn"]}
+        if action.startswith("safety-") and u["state"] != D.SAFETY_ABORT:
+            raise HTTPException(409, "This user is not stopped by a safety abort.")
         if action == "pause":
             db.set_state(uid, D.PAUSED, f"paused by admin {sess['upn']}")
         elif action == "resume":
@@ -388,6 +414,8 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
                 raise HTTPException(409, "Only paused users can be resumed here.")
             db.set_state(uid, D.ACTIVE if u["last_success_at"] else D.ONBOARDING)
         elif action == "approve-resync":
+            if u["state"] == D.SAFETY_ABORT:
+                raise HTTPException(409, "Safety abort: use Restore or Accept deletes.")
             if not u["dryrun_ok_at"] and u["state"] == D.ONBOARDING:
                 raise HTTPException(409, "Run and review the dry-run first.")
             if not (u["needs_resync"] or u["state"] in (D.ONBOARDING, D.CRITICAL)):
@@ -403,9 +431,27 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
                 raise HTTPException(400, "Type the user's UPN to confirm offboarding.")
             db.update_profile(uid, final_sync_requested=1 if form.get("final_sync") == "on" else 0)
             db.set_state(uid, D.OFFBOARDING, f"offboarded by {sess['upn']}")
-        else:
-            raise HTTPException(404)
-        db.audit(actor, f"admin_{action.replace('-', '_')}", uid, {"upn": u["upn"]})
+        elif action in ("safety-restore", "safety-accept-deletes"):
+            # SPEC v0.2 §9.4: both need the dry-run delta list first; both are audited with the counts
+            if not u["safety_delta_at"] or u["safety_delta_requested"]:
+                raise HTTPException(409, "Wait for the dry-run delta list before choosing.")
+            if u["safety_action"]:
+                raise HTTPException(409, f"Already approved: {u['safety_action']}.")
+            now = D.iso(D.utcnow())
+            details.update(abort=json.loads(u["safety_abort_json"] or "{}"), delta=u["safety_delta_summary"])
+            if action == "safety-restore":
+                db.update_profile(uid, safety_action=D.SAFETY_RESTORE, safety_action_by=actor, safety_action_at=now,
+                                  needs_resync=1, resync_approved_by=actor, resync_approved_at=now)
+            else:
+                if form.get("confirm") != u["upn"]:
+                    raise HTTPException(400, "Type the user's UPN to confirm Accept deletes.")
+                db.update_profile(uid, safety_action=D.SAFETY_ACCEPT, safety_action_by=actor, safety_action_at=now)
+        elif action == "safety-refresh-delta":
+            if u["safety_action"]:
+                raise HTTPException(409, f"Already approved: {u['safety_action']}.")
+            db.update_profile(uid, safety_delta_requested=1, safety_delta_at=None, safety_delta_summary=None,
+                              next_run_at=None)
+        db.audit(actor, f"admin_{action.replace('-', '_')}", uid, details)
         return RedirectResponse(f"/admin/users/{uid}", 303)
 
     app.include_router(adm)
@@ -424,7 +470,8 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         if not u:
             raise HTTPException(404)
         return render(request, "user_detail.html", sess, u=u, runs=db.runs(uid, 30), issues=db.open_issues(uid),
-                      nas=db.nas_credential_meta(uid), ms=db.ms_credential(uid), admin=False)
+                      nas=db.nas_credential_meta(uid), ms=db.ms_credential(uid), admin=False,
+                      safety=_safety_view(u, with_delta=False))
 
     def _audit_filter(request: Request) -> list:
         qp = request.query_params

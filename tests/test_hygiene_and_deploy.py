@@ -107,7 +107,14 @@ def test_install_script_pins_and_syntax():
     assert 'RCLONE_VERSION="1.75.2"' in t
     assert "349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702" in t
     assert 'CADDY_VERSION="v2.11.7"' in t and 'XCADDY_VERSION="v0.4.7"' in t and 'GO_VERSION="1.27.3"' in t
-    assert "googleclouddns@6fcdbd98a8565df50ff40ff53411dc6c8d97dcd9" in t
+    # SPEC v0.2: pin the tag; record the commit; verify the built module version + go.sum hash
+    assert 'CADDY_DNS_MODULE="github.com/caddy-dns/googleclouddns"' in t and 'CADDY_DNS_VERSION="v1.1.0"' in t
+    assert "6fcdbd98a8565df50ff40ff53411dc6c8d97dcd9" in t
+    assert 'CADDY_DNS_H1="h1:SDxKxFh7d5Jq2/JPnu9Jv8ErOIdfXmK+Oad0qVzQi80="' in t
+    assert 'plugin_pinned "$T/caddy" ||' in t and "GOSUMDB=sum.golang.org" in t
+    assert 'GO_SHA256="65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40"' in t
+    assert "REPLACE_WITH" not in t and "GO_SHA256 is not pinned" not in t   # v0.1 refusal removed
+    assert 'sha256sum -c -' in t and "Go checksum mismatch: ABORT" in t
     assert 'VERSION_ID:-}" == "24.04"' in t and "--require-hashes" in t and "visudo -cf" in t
     for s in ("install.sh", "update.sh", "rollback.sh"):
         assert subprocess.run(["bash", "-n", str(ROOT / "deploy" / s)]).returncode == 0
@@ -123,3 +130,18 @@ def test_requirements_lock_is_hashed():
     pkgs = [l for l in t.splitlines() if re.match(r"^[a-z0-9]", l)]
     assert pkgs and all("==" in l for l in pkgs)
     assert t.count("--hash=sha256:") >= len(pkgs)
+
+
+def test_install_plugin_pin_check_logic(tmp_path):
+    """Run install.sh's plugin_pinned() against fake `caddy build-info` output (tab-separated Go build info)."""
+    t = (ROOT / "deploy/install.sh").read_text()
+    fn = t[t.index("plugin_pinned() {"):t.index("caddy_ok()")]
+    head = "\n".join(l for l in t.splitlines() if l.startswith(("CADDY_DNS_MODULE=", "CADDY_DNS_VERSION=", "CADDY_DNS_H1=")))
+    for ver, h1, ok in (("v1.1.0", "h1:SDxKxFh7d5Jq2/JPnu9Jv8ErOIdfXmK+Oad0qVzQi80=", 0), ("v1.0.4", "h1:SDxKxFh7d5Jq2/JPnu9Jv8ErOIdfXmK+Oad0qVzQi80=", 1),
+                        ("v1.1.0", "h1:AAAA=", 1)):
+        fake = tmp_path / "caddy"
+        fake.write_text("#!/bin/bash\nprintf 'go\\tgo1.27.3\\npath\\tcaddy\\n"
+                        f"dep\\tgithub.com/caddy-dns/googleclouddns\\t{ver}\\t{h1}\\n'\n")
+        fake.chmod(0o755)
+        r = subprocess.run(["bash", "-c", head + "\n" + fn + f'\nplugin_pinned "{fake}"'])
+        assert r.returncode == ok, (ver, h1)

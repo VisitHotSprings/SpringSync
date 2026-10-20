@@ -130,7 +130,7 @@ sudo REPO_URL=git@github.com:<OWNER>/<REPO>.git TENANT_ID=... CLIENT_ID=... \
      GROUP_USERS=... GROUP_ADMINS=... GROUP_AUDITORS=... \
      SYNC_HOST=sync.hotsprings.org GCP_ACME_PROJECT=... ACME_ZONE=... \
      LAN_CIDRS="10.0.0.0/16" ADMIN_CIDR="10.0.10.0/24" LOG_READERS="walter" \
-     ./deploy/install.sh --version v0.1.0           # add --dry-run to see the plan first
+     ./deploy/install.sh --version v0.2.0           # add --dry-run to see the plan first
 ```
 `install.sh` is idempotent: every step checks state first, and it never overwrites keys, the DB, or settings.
 It handles:
@@ -155,7 +155,7 @@ Updates: `sudo /opt/springsync/current/deploy/update.sh vX.Y.Z`. Rollback:
 ### Bootstrap (`/etc/<slug>/<slug>.toml`, or `ODNAS_<KEY>` env vars; never secrets)
 | Key | Default | Notes |
 |---|---|---|
-| `product_name` / `slug` / `org_name` | `SpringSync` / `springsync` / `VisitHotSprings` | slug drives paths, units, `.<slug>-check`, `.<slug>-archive`; User-Agent `NONISV|<org>|<product>/0.1` |
+| `product_name` / `slug` / `org_name` | `SpringSync` / `springsync` / `VisitHotSprings` | slug drives paths, units, `.<slug>-check`, `.<slug>-archive`; User-Agent `NONISV|<org>|<product>/<major.minor>` (e.g. `SpringSync/0.2`) |
 | `base_url` | `https://sync.hotsprings.org` | redirect URI = base_url + `/auth/callback` |
 | `web_host:web_port`, `broker_host:broker_port` | `127.0.0.1:8080`, `127.0.0.1:8081` | non-loopback is refused |
 | `tenant_id`, `client_id` | – | GUIDs; `common`/`organizations` refused |

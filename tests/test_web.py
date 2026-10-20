@@ -230,3 +230,97 @@ def test_credential_expiry_shown(app, entra, db, kr, cfg):
     mark = login(app, entra, oid="m", upn="mark@hotsprings.org", groups=(G_ADMINS,))
     t = mark.get("/admin").text
     assert "expires 2026-11-01" in t and "critical" in t
+
+
+# ---- SPEC v0.2 §9.4 safety-abort actions: IT-admin only, audited --------------------------
+
+def _safety_user(db, kr, cfg, delta=True):
+    import json as _j
+    from odnas.runner import delta_file
+    from odnas.tokens import write_private
+    uid = seed_user(db, kr, upn="victim@hotsprings.org")
+    db.set_state(uid, D.SAFETY_ABORT, "safety abort")
+    db.update_profile(uid, safety_abort_at=D.iso(D.utcnow()), safety_abort_json=_j.dumps(
+        {"check": "max_delete", "side": "Path2", "path": "/srv/x", "pct": 10, "deletes": 4, "total": 21}),
+        safety_delta_requested=0 if delta else 1)
+    if delta:
+        db.update_profile(uid, safety_delta_at=D.iso(D.utcnow()), safety_delta_summary="NAS: 4 deleted")
+        write_private(delta_file(cfg, uid), _j.dumps({"counts": {}, "truncated": False, "items": [
+            {"side": "Path2", "where": "NAS", "event": "deleted", "name": "Payroll/SECRET-NAME.xlsx"}]}))
+    return uid
+
+
+def test_admin_user_actions_cover_all_routes_in_template(app):
+    from odnas.web.app import ADMIN_USER_ACTIONS
+    assert {"safety-restore", "safety-accept-deletes", "safety-refresh-delta"} <= set(ADMIN_USER_ACTIONS)
+
+
+def test_safety_restore_requires_delta_then_approves_and_audits(app, entra, db, kr, cfg):
+    mark = login(app, entra, oid="m", upn="mark@hotsprings.org", groups=(G_ADMINS,))
+    uid = _safety_user(db, kr, cfg, delta=False)
+    tok = csrf(mark, "/admin")
+    assert mark.post(f"/admin/users/{uid}/safety-restore", data={"csrf": tok}).status_code == 409
+    assert mark.post(f"/admin/users/{uid}/approve-resync", data={"csrf": tok}).status_code == 409
+    db.update_profile(uid, safety_delta_requested=0, safety_delta_at=D.iso(D.utcnow()), safety_delta_summary="NAS: 4 deleted")
+    assert mark.post(f"/admin/users/{uid}/safety-restore", data={"csrf": tok}).status_code == 303
+    u = db.user_full(uid)
+    assert (u["safety_action"], u["safety_action_by"], u["resync_approved_by"], u["needs_resync"]) == \
+        (D.SAFETY_RESTORE, "m", "m", 1)
+    a = db.audit_rows(action="admin_safety_restore")
+    det = __import__("json").loads(a[0]["details_json"])
+    assert a[0]["actor"] == "m" and det["delta"] == "NAS: 4 deleted" and det["abort"]["deletes"] == 4
+    # one decision only
+    assert mark.post(f"/admin/users/{uid}/safety-accept-deletes",
+                     data={"csrf": tok, "confirm": "victim@hotsprings.org"}).status_code == 409
+
+
+def test_safety_accept_deletes_requires_upn_confirmation(app, entra, db, kr, cfg):
+    mark = login(app, entra, oid="m", upn="mark@hotsprings.org", groups=(G_ADMINS,))
+    uid = _safety_user(db, kr, cfg)
+    tok = csrf(mark, "/admin")
+    assert mark.post(f"/admin/users/{uid}/safety-accept-deletes", data={"csrf": tok, "confirm": "x"}).status_code == 400
+    assert db.user_full(uid)["safety_action"] is None
+    assert mark.post(f"/admin/users/{uid}/safety-accept-deletes",
+                     data={"csrf": tok, "confirm": "victim@hotsprings.org"}).status_code == 303
+    assert db.user_full(uid)["safety_action"] == D.SAFETY_ACCEPT
+    assert db.audit_rows(action="admin_safety_accept_deletes")
+
+
+def test_safety_actions_refused_for_users_not_in_safety_abort(app, entra, db, kr):
+    mark = login(app, entra, oid="m", upn="mark@hotsprings.org", groups=(G_ADMINS,))
+    uid = seed_user(db, kr)
+    tok = csrf(mark, "/admin")
+    for a in ("safety-restore", "safety-accept-deletes", "safety-refresh-delta"):
+        assert mark.post(f"/admin/users/{uid}/{a}", data={"csrf": tok, "confirm": "jsmith@hotsprings.org"}).status_code == 409
+    assert mark.post(f"/admin/users/{uid}/no-such-action", data={"csrf": tok}).status_code == 404
+
+
+def test_admin_page_shows_delta_list_and_buttons(app, entra, db, kr, cfg):
+    mark = login(app, entra, oid="m", upn="mark@hotsprings.org", groups=(G_ADMINS,))
+    uid = _safety_user(db, kr, cfg)
+    page = mark.get(f"/admin/users/{uid}").text
+    assert "Payroll/SECRET-NAME.xlsx" in page and "4 of 21" in page
+    assert f"/admin/users/{uid}/safety-restore" in page and f"/admin/users/{uid}/safety-accept-deletes" in page
+
+
+def test_auditor_cannot_use_or_see_safety_actions(app, entra, db, kr, cfg):
+    from odnas.web.app import ADMIN_USER_ACTIONS
+    uid = _safety_user(db, kr, cfg)
+    walter = login(app, entra, oid="w", upn="walter@hotsprings.org", groups=(G_AUDIT,))
+    tok = csrf(walter, "/audit")
+    for a in ADMIN_USER_ACTIONS:
+        r = walter.post(f"/admin/users/{uid}/{a}", data={"csrf": tok, "confirm": "victim@hotsprings.org"})
+        assert r.status_code == 403, a
+    assert walter.get(f"/admin/users/{uid}").status_code == 403
+    page = walter.get(f"/audit/users/{uid}")
+    assert page.status_code == 200 and "4 of 21" in page.text            # counts: yes
+    assert "SECRET-NAME" not in page.text and "Payroll" not in page.text   # filenames: never
+    assert "<form" not in page.text.split("<h2>Open issues")[0].split("Safety abort")[-1]
+    assert "safety-restore" not in page.text and "safety-accept" not in page.text
+    u = db.user_full(uid)
+    assert u["state"] == D.SAFETY_ABORT and u["safety_action"] is None
+    assert not db.audit_rows(action="admin_safety_restore") and not db.audit_rows(action="admin_safety_accept_deletes")
+    # a plain user can't either
+    jsmith = login(app, entra)
+    for a in ADMIN_USER_ACTIONS:
+        assert jsmith.post(f"/admin/users/{uid}/{a}", data={"csrf": csrf(jsmith, "/me")}).status_code == 403, a

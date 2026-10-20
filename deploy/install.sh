@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Idempotent installer for a fresh Ubuntu Server 24.04 LTS amd64 (SPEC §11.2). Run as root.
 #
-#   sudo ./install.sh --version v0.1.0 [--dry-run] [--slug springsync]
+#   sudo ./install.sh --version v0.2.0 [--dry-run] [--slug springsync]
 #
 # Re-running converges. It never overwrites existing keys, the DB, or settings.
 # Inputs (env vars, or prompted when interactive and the bootstrap toml is missing):
@@ -17,10 +17,13 @@ set -euo pipefail
 RCLONE_VERSION="1.75.2"
 RCLONE_SHA256="349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702"   # rclone-v1.75.2-linux-amd64.zip
 GO_VERSION="1.27.3"
-GO_SHA256="${GO_SHA256:-REPLACE_WITH_go1.27.3.linux-amd64.tar.gz_SHA256_FROM_go.dev/dl}"  # not given in SPEC: must be pinned before use
+GO_SHA256="65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40"  # go1.27.3.linux-amd64.tar.gz (SPEC v0.2 §3/§11.2; matches go.dev/dl JSON)
 XCADDY_VERSION="v0.4.7"
 CADDY_VERSION="v2.11.7"
-CADDY_DNS_PLUGIN="github.com/caddy-dns/googleclouddns@6fcdbd98a8565df50ff40ff53411dc6c8d97dcd9"
+CADDY_DNS_MODULE="github.com/caddy-dns/googleclouddns"
+CADDY_DNS_VERSION="v1.1.0"   # tag = commit 6fcdbd98a8565df50ff40ff53411dc6c8d97dcd9 (proxy.golang.org .info Origin.Hash)
+CADDY_DNS_H1="h1:SDxKxFh7d5Jq2/JPnu9Jv8ErOIdfXmK+Oad0qVzQi80="   # sum.golang.org record for v1.1.0
+CADDY_DNS_PLUGIN="$CADDY_DNS_MODULE@$CADDY_DNS_VERSION"
 
 SLUG="springsync"; PRODUCT="SpringSync"; VERSION=""; DRY=0
 while [[ $# -gt 0 ]]; do
@@ -113,19 +116,24 @@ fi
 
 # ---- 5. Caddy (custom build with the Google Cloud DNS plugin) ----------------
 say "5. caddy $CADDY_VERSION + googleclouddns"
+plugin_pinned() {  # $1 = caddy binary; its Go build info must list the pinned module version AND go.sum hash
+  [[ "$("$1" build-info 2>/dev/null | awk -v m="$CADDY_DNS_MODULE" '$1=="dep" && $2==m {print $3" "$4}')" == "$CADDY_DNS_VERSION $CADDY_DNS_H1" ]]; }
 caddy_ok() { /usr/local/bin/caddy version 2>/dev/null | grep -q "^${CADDY_VERSION}" && \
-             /usr/local/bin/caddy list-modules 2>/dev/null | grep -qx 'dns.providers.googleclouddns'; }
+             /usr/local/bin/caddy list-modules 2>/dev/null | grep -qx 'dns.providers.googleclouddns' && \
+             plugin_pinned /usr/local/bin/caddy; }
 if ! caddy_ok; then
-  [[ "$GO_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "GO_SHA256 is not pinned. Copy the sha256 for go$GO_VERSION.linux-amd64.tar.gz from go.dev/dl into this script (or env) first." >&2; exit 1; }
   if (( DRY )); then plan "install Go $GO_VERSION to /usr/local/go-$SLUG, xcaddy $XCADDY_VERSION, build caddy"; else
     T="$(mktemp -d)"; G="go$GO_VERSION.linux-amd64.tar.gz"
     curl -fsSLo "$T/$G" "https://go.dev/dl/$G"
     echo "$GO_SHA256  $T/$G" | sha256sum -c - || { echo "Go checksum mismatch: ABORT" >&2; exit 1; }
     rm -rf "/usr/local/go-$SLUG"; mkdir -p "/usr/local/go-$SLUG"; tar -C "/usr/local/go-$SLUG" --strip-components=1 -xzf "$T/$G"
-    export GOPATH="$T/gopath" GOCACHE="$T/gocache" PATH="/usr/local/go-$SLUG/bin:$PATH" GOFLAGS=-mod=mod GOTOOLCHAIN=local
+    export GOPATH="$T/gopath" GOCACHE="$T/gocache" PATH="/usr/local/go-$SLUG/bin:$PATH" GOFLAGS=-mod=mod GOTOOLCHAIN=local \
+           GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org GONOSUMDB= GOPRIVATE= GOINSECURE=
     go install "github.com/caddyserver/xcaddy/cmd/xcaddy@$XCADDY_VERSION"
     (cd "$T" && "$GOPATH/bin/xcaddy" build "$CADDY_VERSION" --with "$CADDY_DNS_PLUGIN" --output "$T/caddy")
     "$T/caddy" list-modules | grep -qx 'dns.providers.googleclouddns' || { echo "plugin missing from build" >&2; exit 1; }
+    plugin_pinned "$T/caddy" || { echo "googleclouddns is not $CADDY_DNS_VERSION ($CADDY_DNS_H1) in the build: ABORT" >&2; exit 1; }
+    "/usr/local/go-$SLUG/bin/go" version -m "$T/caddy" | grep googleclouddns
     install -m 0755 -o root -g root "$T/caddy" /usr/local/bin/caddy; rm -rf "$T"
   fi
 fi
