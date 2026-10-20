@@ -25,7 +25,7 @@ from odnas.entra import AUTH_CA
 from odnas.nas import V_AUTH_FAILED, V_OK, V_UNREACHABLE, NasAccessProvider
 from odnas.notify import Alert, Alerter
 from odnas.preflight import scan
-from odnas import settings_store
+from odnas import service_mode, settings_store
 from odnas.scheduler import ThrottleGovernor, next_backoff, next_slot, seconds_until_window_end
 from odnas.tokens import TokenStrategy, write_private
 
@@ -201,9 +201,13 @@ class JobRunner:
             if kind == "check":
                 cmd, limit = build_check(self.cfg, jp), None
             else:
+                # Service mode: incremental runs only, window re-checked here at run start
+                sm = service_mode.active_scope(self.db, u) if kind == "bisync" else None
+                if sm:
+                    self.db.q("UPDATE sync_runs SET service_mode=? WHERE id=?", (sm, run_id))
                 cmd = build_bisync(self.cfg, jp, max_delete_pct=max_del, resync=kind in ("resync", "dryrun"),
                                    dry_run=kind in ("dryrun", "delta"), bwlimit=s.resync_bwlimit,
-                                   force=kind in ("delta", "force"))
+                                   force=kind in ("delta", "force"), service_mode=bool(sm))
                 limit = self._limit(kind, u, s, restore)
                 if restore:
                     self.db.audit("system", "safety_restore_started", uid,
@@ -225,6 +229,10 @@ class JobRunner:
                     log.warning("classifier warning uid=%s run=%s exit=%s: %s", uid, run_id, pr.exit_code, oc.warning)
             if kind == "delta" and oc.result == R_OK:
                 self._store_delta(uid, text)
+            if kind == "bisync":
+                # per-side deletions detected in this run (counts only), for the service-mode summary
+                p1, p2 = delete_counts(parse_deltas(text))
+                self.db.q("UPDATE sync_runs SET deletes_path1=?, deletes_path2=? WHERE id=?", (p1, p2, run_id))
             return self._finish(uid, kind, run_id, oc, stats, s, exit_code=pr.exit_code)
         except Exception as e:  # never leave a run row open or secrets behind
             log.exception("job failed uid=%s kind=%s", uid, kind)
@@ -551,7 +559,11 @@ def apply_outcome(db: D.DB, alerter: Alerter, s, uid: str, kind: str, run_id: in
     interval = u["interval_min"] or s.default_interval_min
     prof["next_run_at"] = D.iso(next_slot(now, interval, u["slot_offset_min"], prof["backoff_factor"]))
     db.update_profile(uid, **prof)
-    db.audit("system", f"run_{kind}", uid, {"run_id": run_id, "result": oc.result, "exit_code": exit_code})
+    run = db.one("SELECT service_mode FROM sync_runs WHERE id=?", (run_id,))
+    det = {"run_id": run_id, "result": oc.result, "exit_code": exit_code}
+    if run is not None and run["service_mode"]:
+        det.update(service_mode=run["service_mode"], deleted=st.files_deleted)
+    db.audit("system", f"run_{kind}", uid, det)
 
 
 def set_nas_global_pause(db: D.DB, alerter: Alerter, rec: list[str], uid: str | None, run_id: int | None,

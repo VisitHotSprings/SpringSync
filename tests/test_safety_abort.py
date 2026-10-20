@@ -130,7 +130,7 @@ def test_migration_2_is_expand_only(tmp_path):
     c.execute("INSERT INTO sync_runs(id,user_id,started_at,kind,result) VALUES (7,'u','t','bisync','ok')")
     c.close()
     db = D.DB(str(p))
-    assert db.schema_version() == len(D.MIGRATIONS) == 6
+    assert db.schema_version() == len(D.MIGRATIONS) == 7
     assert dict(db.one("SELECT id, kind, result FROM sync_runs")) == {"id": 7, "kind": "bisync", "result": "ok"}
     db.q("INSERT INTO sync_runs(user_id,started_at,kind) VALUES ('u','t','force')")
     with pytest.raises(Exception):

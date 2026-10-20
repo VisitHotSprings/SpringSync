@@ -46,10 +46,16 @@ def log_path(cfg: Config, uid: str, run_id: int) -> str:
 
 
 def build_bisync(cfg: Config, jp: JobPaths, *, max_delete_pct: int, resync: bool = False, dry_run: bool = False,
-                 bwlimit: str = "", force: bool = False) -> list[str]:
+                 bwlimit: str = "", force: bool = False, service_mode: bool = False) -> list[str]:
     """force=True is ONLY for (a) the admin-approved one-off "Accept deletes" run and (b) the read-only
-    `--dry-run --force` delta list after a safety abort (SPEC v0.2 §9.3/§9.4). Never on a scheduled run."""
-    if not 1 <= max_delete_pct <= 50:
+    `--dry-run --force` delta list after a safety abort (SPEC v0.2 §9.3/§9.4). Never on a scheduled run.
+    service_mode=True (incremental runs only) replaces the max-delete stop with `--max-delete 100`, which
+    never trips; omitting the flag would fall back to rclone's 50% default."""
+    if service_mode:
+        if resync or dry_run or force:
+            raise ValueError("service mode applies to incremental bisync runs only")
+        max_delete_pct = 100
+    elif not 1 <= max_delete_pct <= 50:
         raise ValueError("max_delete_pct out of range")
     if force and resync:
         raise ValueError("--force is never combined with --resync")

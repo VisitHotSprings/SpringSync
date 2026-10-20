@@ -127,28 +127,47 @@ Also not covered by local tests:
 - ~~What gets test-mounted~~: the svc-sync-only health-check share (`nas_health_share`, default `Sync-Health`).
 - ~~Offboarding during the pause / switching to A / hold count across re-queue~~: accepted as built.
 
-### Still open or ambiguous (v0.7)
+### Resolved by SPEC v0.8 (closed)
+- ~~Health-check interval and alert rule~~: every 15 min; `medium` after 2 consecutive failures.
+- ~~Service mode scope~~: all users plus selected accounts (§9.5).
+
+### Still open or ambiguous (v0.8)
 1. **§14.13: may IT admins see file names in the Accept-deletes list?** Walter has to sign off. **This
    stays OPEN and is going to Mark via Gidget.** Until then the list has its own IT-admin-only page,
    Auditors and Users get 403, every view is audited, and everything else carries counts only.
-2. **Creating `Sync-Health` (and the Option B shares and svc-sync account) needs Mark's OK.** It is a NAS
-   change, documented in docs/DEPLOY.md and not done. Until it exists under Option B, the routine health
-   check reports the share as unreachable/error (`medium` alert) and a pause can't clear.
-3. **Health-check interval** is 15 min, my choice (the spec gives none). It isn't a setting. Its alert is
-   `medium` from the first failure (no "2 in a row" rule like mount failures). Confirm.
-4. **Health check under Option A.** There is no svc-sync, so there is no health check. The NAS is only
-   seen through users' runs (mount-failure counter). Confirm that Option A needs nothing more.
-5. **A missing health share vs. a rejected password.** If the share doesn't exist, the NAS may answer with
-   an error the helper maps to `error`/`unreachable` (not a logon failure). The pause then keeps
-   "testing" with 5-min retries. The exact CIFS error codes need lab test T-N2.
-6. **The health check could, in theory, set the pause on a transient logon error.** It is treated like a
-   run's rejection: no retry until a new password is saved. That is the same rule as runs.
-7. **Shared tonight window** (one resync at a time), onboarding Restore rules, and the 30-min cutoff only
-   for tonight Restores: accepted for the pilot unless Mark objects.
-8. **Lockout under `--resilient`** still isn't reproducible locally. The integration test drops
-   `--resilient`. A T-B* lab test should capture a real one.
-9. **`caddy build-info` format** (used by the plugin-pin check) is untested until T-C1.
-10. **Worker hardening:** `NoNewPrivileges` is off because the worker needs sudo. A socket-activated helper
+2. **Service mode is a real risk window. Flagged for Mark.** Integration-tested: under service mode, a
+   deletion of **100%** of one side's files propagates.
+   - What still protects us: the all-files-changed check, `--check-access` (catches an empty or wrong
+     mount), `.springsync-archive` (every deleted file is kept), the OneDrive recycle bin and NAS snapshots.
+   - What doesn't: a real mass deletion on one side, e.g. ransomware that deletes rather than encrypts, or
+     a OneDrive-side mistake. It reaches the other side within one slot.
+   - Options, not built:
+     - a high ceiling (e.g. 90%) instead of 100;
+     - an alert when one service-mode run deletes more than N files;
+     - a delete-count cap per window.
+3. **"End time" input.** The UI asks for a duration in whole hours (1-24, default 4), and the end time is
+   shown and stored. There is no picker for a clock time. Confirm.
+4. **Extend semantics.** Re-enabling sets the end to now + the new hours (still max 24 h from now), so
+   repeated extends can keep it on for longer than 24 h in total. Each extend is audited. Should there be a
+   hard total cap?
+5. **Typed confirmation** is required only for the all-users switch (`ALL USERS`); selected accounts need a
+   reason, not a typed confirmation.
+6. **Both scopes at once.** A run is tagged `all` when the all-users window is open, else `user`. Each
+   window's end summary counts only runs with its own tag, so an overlap is counted once, under all users.
+7. **Per-side delete counts** come from the run log's `File was deleted` lines on each side (the deletion
+   is then applied to the other side). `files_deleted` (rclone stats) stays as the total.
+8. **The user's own status page** doesn't show service mode (not in §6.5's lists). Should employees see
+   that it's on?
+9. **Summary alert severity** is `low` (not stated in the spec).
+10. **Creating `Sync-Health`** (and the Option B shares and svc-sync account) needs Mark's OK. Documented
+    in docs/DEPLOY.md, not done.
+11. **A missing health share vs. a rejected password**: the CIFS error codes need lab test T-N2.
+12. **Shared tonight window**, onboarding Restore rules, and the 30-min cutoff only for tonight Restores:
+    accepted for the pilot unless Mark objects.
+13. **Lockout under `--resilient`** still isn't reproducible locally. The integration test drops
+    `--resilient`. A T-B* lab test should capture a real one.
+14. **`caddy build-info` format** (used by the plugin-pin check) is untested until T-C1.
+15. **Worker hardening:** `NoNewPrivileges` is off because the worker needs sudo. A socket-activated helper
     would allow it.
-11. **The internal web→worker token** is HMAC-derived from the data key, not a separate secret.
-12. **Option B "mounted persistently"** is per-run idempotent mounts. A boot-time mount unit is not built.
+16. **The internal web→worker token** is HMAC-derived from the data key, not a separate secret.
+17. **Option B "mounted persistently"** is per-run idempotent mounts. A boot-time mount unit is not built.

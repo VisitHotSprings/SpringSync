@@ -1,4 +1,21 @@
 {% extends "base.html" %}{% block body %}
 <h1>Admin</h1>
 {% set base = '/admin' %}{% include "_users.html" %}{% include "_overview.html" %}
+<h2>Service mode</h2>
+<p><small>For planned bulk work (cleanup, reorganisation, NAS move). Covered users' scheduled syncs run with <code>--max-delete 100</code> (no safety stop for large deletes). Never <code>--force</code>: the "all files changed" check and the check-file test stay on, deleted files still go to the archive folder. Not applied to onboarding users, Restore or Accept-deletes runs, and it doesn't clear an existing safety abort. Ends automatically; {{ sm_limits[0] }}-{{ sm_limits[1] }} h.</small></p>
+<form method="post" action="/admin/service-mode"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="scope" value="all">
+{% if sm.global %}<input type="hidden" name="op" value="off"><button>Turn off now (all users)</button></form>
+<form method="post" action="/admin/service-mode"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="scope" value="all">{% endif %}
+<input type="hidden" name="op" value="on">
+<label>Reason <input type="text" name="reason" required minlength="3" maxlength="200"></label>
+<label>Hours <input type="number" name="hours" min="{{ sm_limits[0] }}" max="{{ sm_limits[1] }}" value="{{ sm_limits[2] }}"></label>
+<label>Type <code>{{ sm_confirm }}</code> to confirm <input type="text" name="confirm"></label>
+<button>{{ 'Extend (all users)' if sm.global else 'Turn on for ALL users' }}</button></form>
+<form method="post" action="/admin/service-mode"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="scope" value="selected">
+<fieldset><legend>Selected accounts</legend>
+{% for u in users if u.state not in ('removed','offboarding') and u.onboarding_completed_at %}<label><input type="checkbox" name="user_id" value="{{ u.id }}"> {{ u.upn }}{% if u.service_mode_until %} (on until {{ u.service_mode_until|local }}){% endif %}</label><br>{% endfor %}
+</fieldset>
+<label>Reason <input type="text" name="reason" maxlength="200"></label>
+<label>Hours <input type="number" name="hours" min="{{ sm_limits[0] }}" max="{{ sm_limits[1] }}" value="{{ sm_limits[2] }}"></label>
+<button name="op" value="on">Turn on / extend for selected</button> <button name="op" value="off">Turn off for selected</button></form>
 {% endblock %}

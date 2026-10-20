@@ -198,3 +198,49 @@ def test_exit_7_lockout_must_resync(env):
 def test_rclone_version_pinned():
     out = subprocess.run([RCLONE, "version"], capture_output=True, text=True).stdout
     assert out.startswith("rclone v1.75.2")
+
+
+# ---- SPEC v0.8 §9.5 service mode, against the real rclone ------------------------------------------
+
+def test_service_mode_100pct_delete_goes_through_into_archive(env):
+    c, p1, mnt = env
+    seed(c, p1, mnt)
+    assert run(c, p1, mnt, 1, resync=True)[0] == 0
+    for i in range(20):
+        (mnt / "Files" / f"f{i}.txt").unlink()           # every file deleted on the NAS side
+    code, text, oc = run(c, p1, mnt, 2, service_mode=True)
+    assert code == 0 and oc.result == R_OK, text[-1500:]
+    assert not any((p1 / f"f{i}.txt").exists() for i in range(20))
+    arch = list((p1 / c.archive_dirname).rglob("f*.txt"))
+    assert len(arch) == 20                               # kept in .springsync-archive on OneDrive
+    from odnas.runner import delete_counts
+    assert delete_counts(parse_deltas(text)) == (0, 20)
+    assert "--force" not in build_bisync(c, JobPaths(UID, 3, "/dev/null", str(mnt), "Files"),
+                                         max_delete_pct=10, service_mode=True)
+
+
+def test_service_mode_still_aborts_when_all_files_changed(env):
+    import os
+    import time
+    c, p1, mnt = env
+    seed(c, p1, mnt)
+    assert run(c, p1, mnt, 1, resync=True)[0] == 0
+    t = time.time() + 3600
+    for f in (mnt / "Files").iterdir():
+        if f.is_file():
+            f.write_text(f.read_text() + "changed\n")
+            os.utime(f, (t, t))
+    code, text, oc = run(c, p1, mnt, 2, service_mode=True)
+    assert oc.result == "safety_abort", text[-1500:]
+    assert oc.safety.check == "all_files_changed"
+
+
+def test_service_mode_still_needs_check_file(env):
+    c, p1, mnt = env
+    seed(c, p1, mnt)
+    assert run(c, p1, mnt, 1, resync=True)[0] == 0
+    for f in (mnt / "Files").iterdir():                  # an empty NAS side (e.g. a wrong mount)
+        f.unlink()
+    code, text, oc = run(c, p1, mnt, 2, service_mode=True)
+    assert code == 7 and oc.result in ("critical_retryable", "critical"), text[-1500:]
+    assert (p1 / "f0.txt").exists()                      # nothing was deleted on OneDrive

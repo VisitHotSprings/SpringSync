@@ -208,7 +208,7 @@ def test_global_pause_shown_on_admin_settings_and_auditor_pages(cfg, db, kr, ent
 
 
 def test_migration_6_adds_hold_count_and_worker_state(db):
-    assert db.schema_version() == 6
+    assert db.schema_version() >= 6
     cols = {r["name"] for r in db.all("PRAGMA table_info(sync_profiles)")}
     assert "tonight_hold_nights" in cols
     assert db.one("SELECT name FROM sqlite_master WHERE type='table' AND name='worker_state'")

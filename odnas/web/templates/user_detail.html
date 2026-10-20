@@ -8,8 +8,16 @@
 <tr><th>Microsoft credential</th><td>{% if ms %}stored; last refresh {{ ms.last_refresh_at|local }}{% if ms.last_refresh_error %}; last error {{ ms.last_refresh_error }}{% endif %}{% else %}none{% endif %}</td></tr>
 <tr><th>NAS credential</th><td>{% if nas %}stored (option {{ nas.provider }}); verified {{ nas.verified_at|local }}; failures {{ nas.failure_count }}{% else %}none{% endif %}</td></tr>
 <tr><th>Last success / check</th><td>{{ u.last_success_at|local }} / {{ u.last_check_at|local }}</td></tr>
+<tr><th>Service mode</th><td>{% if sm_scope == 'all' %}ON (all users) until {{ sm_global.ends_at|local }}: {{ sm_global.reason }}{% if sm_user %}; also selected until {{ sm_user.ends_at|local }}{% endif %}{% elif sm_user and sm_scope %}ON until {{ sm_user.ends_at|local }}, by {{ sm_user.set_by }}: {{ sm_user.reason }}{% elif sm_global or sm_user %}switched on, but not applied (onboarding incomplete){% else %}off{% endif %}{% for d in sm_deletes %}. Deletes in this window: OneDrive {{ d.deleted_onedrive }} / NAS {{ d.deleted_nas }}{% endfor %}</td></tr>
 <tr><th>Schedule</th><td>offset {{ u.slot_offset_min }} min, backoff x{{ u.backoff_factor }}, next {{ u.next_run_at|local }}</td></tr>
 </table>
+{% if admin and sm_eligible %}
+<form class="inline" method="post" action="/admin/users/{{ u.id }}/service-mode-on"><input type="hidden" name="csrf" value="{{ csrf }}">
+<label>Reason <input type="text" name="reason" required minlength="3" maxlength="200"></label>
+<label>Hours <input type="number" name="hours" min="{{ sm_limits[0] }}" max="{{ sm_limits[1] }}" value="{{ sm_limits[2] }}"></label>
+<button>{{ 'Extend service mode' if sm_user else 'Turn on service mode' }}</button></form>
+{% if sm_user %}<form class="inline" method="post" action="/admin/users/{{ u.id }}/service-mode-off"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Turn off service mode now</button></form>{% endif %}
+{% endif %}
 {% if safety %}
 <h2>Safety abort</h2>
 <table>
@@ -56,6 +64,6 @@
 <h2>Open issues</h2><ul>{% for i in issues %}<li>{{ i.type }} ({{ i.severity }}): {{ i.summary }}</li>{% else %}<li>none</li>{% endfor %}</ul>
 <h2>Runs</h2>
 <table><tr><th>Started</th><th>Ended</th><th>Kind</th><th>Exit</th><th>Result</th><th>Copied</th><th>Deleted</th><th>Bytes</th><th>Conflicts</th><th>Errors</th><th>Detail</th></tr>
-{% for r in runs %}<tr><td>{{ r.started_at|local }}</td><td>{{ r.ended_at|local }}</td><td>{{ r.kind }}</td><td>{{ r.exit_code }}</td><td>{{ r.result }}</td><td>{{ r.files_copied }}</td><td>{{ r.files_deleted }}</td><td>{{ r.bytes }}</td><td>{{ r.conflicts }}</td><td>{{ r.errors_count }}</td><td>{{ r.detail }}</td></tr>{% endfor %}
+{% for r in runs %}<tr><td>{{ r.started_at|local }}</td><td>{{ r.ended_at|local }}</td><td>{{ r.kind }}{% if r.service_mode %} <span class="badge warn">service mode ({{ r.service_mode }})</span>{% endif %}</td><td>{{ r.exit_code }}</td><td>{{ r.result }}</td><td>{{ r.files_copied }}</td><td>{{ r.files_deleted }}</td><td>{{ r.bytes }}</td><td>{{ r.conflicts }}</td><td>{{ r.errors_count }}</td><td>{{ r.detail }}</td></tr>{% endfor %}
 </table>
 {% endblock %}

@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.8.0 (unreleased, lab build, 2026-10-20). Follows SPEC.md v0.8 (§9.5 Service mode; Mark's request)
+### Added
+- **Service mode** (`odnas/service_mode.py`):
+  - **Scopes:** all users and/or selected accounts.
+  - **Switches:** the all-users switch (typed `ALL USERS`) and the selected-accounts picker on the admin
+    dashboard, plus a toggle on each user's admin page. IT admins only; auditors get 403 on every
+    service-mode POST.
+  - **Window:** each needs a reason (3-200 chars) and a duration of 1-24 h, default 4 h. Re-enabling an
+    active window extends it (audited `service_mode_extended` with the previous end time). "Turn off now"
+    is available.
+  - **Effect:** scheduled `bisync` runs of covered users get `--max-delete 100` (`build_bisync(...,
+    service_mode=True)`, refused for resync, dry-run and `--force` builds). Nothing else changes; never
+    `--force`.
+  - **Not applied to:** onboarding-incomplete users (the picker doesn't offer them; the server refuses them
+    with 409), Restore, Accept deletes, delta lists, resyncs, checks, already-paused users (an existing
+    `safety_abort` is kept), or runs blocked by `nas_global_pause`.
+  - **Window checks:** the window is checked at the start of each run (an expired window is never applied,
+    even before the tick), and a run keeps the flags it started with. The tick expires windows at their
+    stored end time, also after a restart (audited `service_mode_expired`, actor `system`).
+  - **Audit:** `service_mode_enabled` / `_extended` / `_disabled` / `_expired`, with who, scope, reason,
+    hours, end time and the per-user delete counts at the end.
+  - **Alerts:** `low` `service_mode` while on. At the end, a `low` `service_mode_summary` with deletes per
+    user per side (counts only, no file names).
+  - **Visibility:**
+    - a banner on the admin dashboard and auditor view (scope, who, reason, end time, deletes so far);
+    - a "Service mode" status row on the dashboard and on user pages;
+    - a "service mode" badge in the user list and on each service-mode run.
+- **Per-run delete counts per side** for every bisync run (`sync_runs.deletes_path1/2`, from the run's
+  delta lines), so the service-mode summary can add them up.
+- Migration 7 (expand-only):
+  - `sync_profiles.service_mode_until / _by / _at / _reason`;
+  - `sync_runs.service_mode` (`all`|`user`|NULL), `deletes_path1`, `deletes_path2`;
+  - the `worker_state` key `service_mode_global` (ends_at, started_at, set_by, set_by_upn, hours, reason).
+- **Real-rclone integration tests (v1.75.2):**
+  - with `--max-delete 100`, deleting **100%** of one side goes through (exit 0) and every deleted file
+    lands in `.springsync-archive`;
+  - an all-files-changed side still aborts as `safety_abort`;
+  - an empty NAS side (no check file) still fails `--check-access` (exit 7), with nothing deleted.
+- Tests: 281 total (55 smoke, 12 integration).
+
+### Changed
+- **NAS health check (SPEC v0.8 §10.2):** the `medium` alert now comes after **2 consecutive failures**
+  (the count is kept in the `nas_health` heartbeat and reset by any OK). A password rejection still goes
+  straight to `nas_global_pause` and its `high` alert.
+- Version 0.8.0 (User-Agent `…|SpringSync/0.8`).
+
 ## 0.7.0 (unreleased, lab build, 2026-10-20). Follows SPEC.md v0.7
 ### Added
 - **Health-check share:** new setting `nas_health_share` (NAS group, default `Sync-Health`, share-name

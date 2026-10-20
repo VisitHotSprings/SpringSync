@@ -82,7 +82,7 @@ flowchart LR
 | exit 1, 3, 4, 5, 6, 8, 10, or killed by a signal | `retryable` |
 | NAS mount failed, rclone never started (SPEC v0.4) | `retryable`, but **outside** the same-error chain (neither counts nor resets it); separate counter, admin alert after 2 in a row, no lockout. Only a **successful mount** resets the counter (v0.5) |
 | NAS rejected the login (wrong password), Option A | `nas_auth` → that user `nas_auth_failed`: paused at once, no retries, own alert; leaves the mount-failure counter unchanged (v0.5) |
-| NAS rejected the shared `svc-sync` login, Option B (v0.6) | `nas_auth` → **one server-wide NAS pause** (`worker_state` row `nas_global_pause`), one `high` alert, no retries, no user state changed; banner on the admin dashboard, Settings and auditor view. Clears automatically once a new `nas_svc_password` is saved and a test mount with it succeeds (a rejected new password is never retried). The test mount (worker's next tick, ≤60 s; Settings shows "Testing new password…") and the routine 15-min NAS health check both use the svc-sync-only **health-check share** (`nas_health_share`, default `Sync-Health`), never a user's `Home-<user>` share. Creating that share is a manual NAS step that needs Mark's OK (docs/DEPLOY.md); `install.sh` only prints a reminder |
+| NAS rejected the shared `svc-sync` login, Option B (v0.6) | `nas_auth` → **one server-wide NAS pause** (`worker_state` row `nas_global_pause`), one `high` alert, no retries, no user state changed; banner on the admin dashboard, Settings and auditor view. Clears automatically once a new `nas_svc_password` is saved and a test mount with it succeeds (a rejected new password is never retried). The test mount (worker's next tick, ≤60 s; Settings shows "Testing new password…") and the routine 15-min NAS health check (`medium` alert after 2 consecutive failures, v0.8) both use the svc-sync-only **health-check share** (`nas_health_share`, default `Sync-Health`), never a user's `Home-<user>` share. Creating that share is a manual NAS step that needs Mark's OK (docs/DEPLOY.md); `install.sh` only prints a reminder |
 
 Value names (`users.state`, `sync_runs.result`, `sync_runs.kind`) match SPEC v0.4 §5 exactly; a test
 compares the code's lists with the spec text.
@@ -129,6 +129,27 @@ compares the code's lists with the spec text.
      IT-admin-only page, and every view of it is audited (§14.13, pending Walter's sign-off).
 - **Offboarding:** admin clicks **Offboard** → optional final sync → crypto-erase (credential rows deleted with
   `secure_delete`, then `VACUUM`) → workdir removed → `removed`.
+
+**Service mode** (SPEC v0.8 §9.5, `odnas/service_mode.py`), for planned bulk work such as a cleanup,
+reorganisation or NAS move:
+- **Scope:** an IT admin turns it on for **all users** (dashboard switch, typed confirmation `ALL USERS`;
+  `worker_state` row `service_mode_global`) and/or for **selected accounts** (dashboard picker or the
+  user's page; `sync_profiles.service_mode_until`).
+- **Window:** each needs a reason and an end time: default 4 h, 1-24 h. Re-enabling extends it.
+  **Turn off now** ends it at once.
+- **Effect:** covered users' scheduled bisync runs use `--max-delete 100` (never trips; omitting the flag
+  would mean rclone's 50% default). **Never `--force`.** The all-files-changed abort, `--check-access`
+  (an empty or unmounted side has no check file), filters, the run-time limit and the lockout rules all
+  stay. Deletes still go to `.springsync-archive`. Real-rclone integration tests cover all of this.
+- **Not applied to:** onboarding-incomplete users, Restore / Accept deletes / delta lists / resyncs, users
+  already paused (an existing `safety_abort` stays), or while `nas_global_pause` blocks runs.
+- **Ending:** it ends on its own at the stored end time, also after a restart. A run started inside the
+  window keeps its flags.
+- **Record:** each run is tagged `sync_runs.service_mode` (`all`/`user`) with per-side delete counts
+  (`deletes_path1`/`deletes_path2`).
+- **Audit and alerts:** on, off, extend and expire are audited. On raises a `low` alert; the end raises a
+  summary alert with deletes per user per side (counts only).
+- **Visibility:** a banner and status row for admins and auditors (Walter: read-only, no buttons).
 
 ## Repository layout
 
@@ -183,7 +204,7 @@ sudo REPO_URL=git@github.com:<OWNER>/<REPO>.git TENANT_ID=... CLIENT_ID=... \
      GROUP_USERS=... GROUP_ADMINS=... GROUP_AUDITORS=... \
      SYNC_HOST=sync.hotsprings.org GCP_ACME_PROJECT=... ACME_ZONE=... \
      LAN_CIDRS="10.0.0.0/16" ADMIN_CIDR="10.0.10.0/24" LOG_READERS="walter" \
-     ./deploy/install.sh --version v0.7.0           # add --dry-run to see the plan first
+     ./deploy/install.sh --version v0.8.0           # add --dry-run to see the plan first
 ```
 `install.sh` is idempotent: every step checks state first, and it never overwrites keys, the DB, or settings.
 It handles:

@@ -1,3 +1,8 @@
+{% if sm and sm.any %}<div class="banner warn" id="service-mode"><strong>Service mode is ON</strong> (no max-delete safety stop for covered users; never --force; deletes still go to the archive folder).
+<ul>
+{% if sm.global %}<li><strong>All users</strong> until {{ sm.global.ends_at|local }}, turned on by {{ sm.global.set_by_upn }} {{ sm.global.started_at|local }}: {{ sm.global.reason }}{% if sm.global_deletes %}. Deletes so far: {% for d in sm.global_deletes %}{{ d.upn }} OneDrive {{ d.deleted_onedrive }} / NAS {{ d.deleted_nas }}{% if not loop.last %}; {% endif %}{% endfor %}{% endif %}</li>{% endif %}
+{% for x in sm.users %}<li>{{ x.upn }} until {{ x.ends_at|local }}, by {{ x.set_by }} {{ x.started_at|local }}: {{ x.reason }}{% for d in x.deletes %}. Deletes so far: OneDrive {{ d.deleted_onedrive }} / NAS {{ d.deleted_nas }}{% endfor %}</li>{% endfor %}
+</ul></div>{% endif %}
 {% if nas_pause %}<p class="banner critical"><strong>All NAS syncs are paused</strong> since {{ nas_pause.set_at|local }}: {{ nas_pause.reason }}. No retries until IT saves a new svc-sync password in Settings and a test mount succeeds.{% if nas_pause.tested_pw_version %} The last new password was also rejected.{% endif %}</p>{% endif %}
 <h2>Service health</h2>
 <table>
@@ -8,6 +13,7 @@
 <tr><th>Disk free</th><td>{{ disk if disk is not none else '?' }}%</td></tr>
 <tr><th>Audit chain</th><td>{{ chain.detail if chain else 'not verified yet' }}</td></tr>
 <tr><th>NAS option</th><td>{{ nas_option }}</td></tr>
+<tr><th>Service mode</th><td><span class="badge {{ 'warn' if sm and sm.any else 'ok' }}">{% if sm and sm.global %}ON (all users){% elif sm and sm.users %}ON ({{ sm.users|length }} account(s)){% else %}off{% endif %}</span></td></tr>
 <tr><th>NAS sync</th><td><span class="badge {{ 'critical' if nas_pause else 'ok' }}">{{ 'PAUSED (server-wide)' if nas_pause else 'running' }}</span></td></tr>
 </table>
 <h2>Open issues</h2>

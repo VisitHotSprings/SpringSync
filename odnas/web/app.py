@@ -23,6 +23,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from odnas import service_mode
+from odnas.notify import Alerter
 from odnas import __version__
 from odnas import db as D
 from odnas import settings_store
@@ -41,7 +43,8 @@ SESSION_HOURS = 8
 ROLE_USER, ROLE_ADMIN, ROLE_AUDITOR = "user", "admin", "auditor"
 # Every POST /admin/users/{uid}/{action}. IT-admin role only (SpringSync-Admins); auditors get 403.
 ADMIN_USER_ACTIONS = ("pause", "resume", "approve-resync", "request-dryrun", "offboard",
-                      "safety-restore", "safety-accept-deletes", "safety-refresh-delta")
+                      "safety-restore", "safety-accept-deletes", "safety-refresh-delta",
+                      "service-mode-on", "service-mode-off")
 
 CSP = ("default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; "
        "base-uri 'none'")
@@ -355,7 +358,9 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         return {"users": db.users(include_removed=True), "issues": db.open_issues(), "worker_alive": alive,
                 "worker_hb": hb, "expiry": credential_expiry(cfg, s), "disk": disk_free_pct(cfg.p_state),
                 "tls": tls["detail"] if tls else "", "chain": db.heartbeat("audit_chain"), "s": s,
-                "nas_option": s.nas_option, "nas_pause": db.flag(D.NAS_GLOBAL_PAUSE)}
+                "nas_option": s.nas_option, "nas_pause": db.flag(D.NAS_GLOBAL_PAUSE), "sm": service_mode.view(db),
+                "sm_limits": (service_mode.MIN_HOURS, service_mode.MAX_HOURS, service_mode.DEFAULT_HOURS),
+                "sm_confirm": service_mode.CONFIRM_ALL}
 
     @adm.get("", response_class=HTMLResponse)
     def admin_home(request: Request, sess: dict = Depends(admin_dep)):
@@ -397,7 +402,58 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
             raise HTTPException(404)
         return render(request, "user_detail.html", sess, u=u, runs=db.runs(uid, 30), issues=db.open_issues(uid),
                       nas=db.nas_credential_meta(uid), ms=db.ms_credential(uid), admin=True,
-                      safety=_safety_view(u, with_delta=True))
+                      safety=_safety_view(u, with_delta=True), **_sm_user(u))
+
+    def _sm_user(u) -> dict:
+        w = service_mode.user_window(u)
+        return {"sm_user": w, "sm_global": service_mode.global_window(db),
+                "sm_scope": service_mode.active_scope(db, u),
+                "sm_eligible": bool(u["onboarding_completed_at"]) and u["state"] not in (D.REMOVED, D.OFFBOARDING),
+                "sm_deletes": service_mode.deletes_during(db, w["started_at"] or "", service_mode.SCOPE_USER, u["id"])
+                if w else [],
+                "sm_limits": (service_mode.MIN_HOURS, service_mode.MAX_HOURS, service_mode.DEFAULT_HOURS)}
+
+    @adm.post("/service-mode")
+    async def admin_service_mode(request: Request, sess: dict = Depends(admin_dep)):
+        """SPEC v0.8 §9.5: the All-users switch and the Selected-accounts picker. IT admins only."""
+        form = await check_csrf(request, sess)
+        raw = await request.form()
+        scope, op = str(form.get("scope", "")), str(form.get("op", ""))
+        alerter = Alerter(db)
+        actor, upn = sess["oid"], sess["upn"]
+        if scope not in ("all", "selected") or op not in ("on", "off"):
+            raise HTTPException(400, "bad service-mode request")
+        if op == "on":
+            try:
+                hours = service_mode.parse_hours(form.get("hours"))
+                reason = service_mode.parse_reason(form.get("reason"))
+            except ValueError as e:
+                raise HTTPException(400, str(e)) from None
+        if scope == "all":
+            if op == "on":
+                if str(form.get("confirm", "")).strip() != service_mode.CONFIRM_ALL:
+                    raise HTTPException(400, f"Type {service_mode.CONFIRM_ALL} to confirm service mode for everyone.")
+                service_mode.enable_all(db, alerter, actor, upn, hours, reason, settings())
+            else:
+                service_mode.disable_all(db, alerter, actor, upn, s=settings())
+            return RedirectResponse("/admin", 303)
+        ids = [str(x) for x in raw.getlist("user_id")]
+        if not ids:
+            raise HTTPException(400, "Select at least one account.")
+        users = [db.user_full(i) for i in ids]
+        if any(u is None for u in users):
+            raise HTTPException(404)
+        for u in users:
+            if op == "on":
+                if not u["onboarding_completed_at"] or u["state"] in (D.REMOVED, D.OFFBOARDING):
+                    raise HTTPException(409, f"{u['upn']}: service mode doesn't apply (onboarding incomplete or "
+                                             "leaving). Nothing was changed.")
+        for u in users:
+            if op == "on":
+                service_mode.enable_user(db, alerter, u["id"], actor, upn, hours, reason, settings())
+            else:
+                service_mode.disable_user(db, alerter, u["id"], actor, upn, s=settings())
+        return RedirectResponse("/admin", 303)
 
     def _delta_doc(uid: str) -> dict | None:
         f = delta_file(cfg, uid)
@@ -463,6 +519,20 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         details: dict = {"upn": u["upn"]}
         if action.startswith("safety-") and u["state"] != D.SAFETY_ABORT:
             raise HTTPException(409, "This user is not stopped by a safety abort.")
+        if action in ("service-mode-on", "service-mode-off"):
+            alerter = Alerter(db)
+            if action == "service-mode-off":
+                service_mode.disable_user(db, alerter, uid, actor, sess["upn"], s=settings())
+                return RedirectResponse(f"/admin/users/{uid}", 303)
+            if not u["onboarding_completed_at"] or u["state"] in (D.REMOVED, D.OFFBOARDING):
+                raise HTTPException(409, "Service mode doesn't apply to this user (onboarding incomplete or leaving).")
+            try:
+                hours = service_mode.parse_hours(form.get("hours"))
+                reason = service_mode.parse_reason(form.get("reason"))
+            except ValueError as e:
+                raise HTTPException(400, str(e)) from None
+            service_mode.enable_user(db, alerter, uid, actor, sess["upn"], hours, reason, settings())
+            return RedirectResponse(f"/admin/users/{uid}", 303)  # audited inside (service_mode_*)
         if action == "pause":
             db.set_state(uid, D.PAUSED, f"paused by admin {sess['upn']}")
         elif action == "resume":
@@ -564,7 +634,7 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
             raise HTTPException(404)
         return render(request, "user_detail.html", sess, u=u, runs=db.runs(uid, 30), issues=db.open_issues(uid),
                       nas=db.nas_credential_meta(uid), ms=db.ms_credential(uid), admin=False,
-                      safety=_safety_view(u, with_delta=False))
+                      safety=_safety_view(u, with_delta=False), **_sm_user(u))
 
     def _audit_filter(request: Request) -> list:
         qp = request.query_params

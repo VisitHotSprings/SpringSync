@@ -254,9 +254,24 @@ MIGRATIONS: list[str] = [
         detail_json TEXT NOT NULL DEFAULT '{}'
     );
     """,
+    # 7: SPEC v0.8 §9.5 Service mode. Expand-only.
+    #    Selected accounts: sync_profiles.service_mode_until (NULL = off) + who/when/reason.
+    #    All users: the worker_state row 'service_mode_global' (ends_at, set_by, reason in detail_json).
+    #    Each run is tagged with the scope it ran under ('all' | 'user', NULL = normal), and bisync runs record
+    #    the deletions detected per side (deletes_path1 = deleted on OneDrive, so removed from the NAS too).
+    """
+    ALTER TABLE sync_profiles ADD COLUMN service_mode_until TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN service_mode_by TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN service_mode_at TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN service_mode_reason TEXT;
+    ALTER TABLE sync_runs ADD COLUMN service_mode TEXT CHECK (service_mode IN ('all','user'));
+    ALTER TABLE sync_runs ADD COLUMN deletes_path1 INTEGER;
+    ALTER TABLE sync_runs ADD COLUMN deletes_path2 INTEGER;
+    """,
 ]
 
 NAS_GLOBAL_PAUSE = "nas_global_pause"   # worker_state key (SPEC v0.6 §9.4, Option B only)
+SERVICE_MODE_GLOBAL = "service_mode_global"   # worker_state key: all-users service mode (SPEC v0.8 §9.5)
 
 TONIGHT_MIN_REMAINING_S = 30 * 60   # SPEC v0.5 §9.4.1: a tonight run starts only with >= 30 min left
 
@@ -451,7 +466,7 @@ class DB:
 
     def runs(self, uid: str, limit: int = 20) -> list[sqlite3.Row]:
         return self.all("SELECT id, started_at, ended_at, kind, exit_code, result, files_copied, files_deleted, bytes,"
-                        " conflicts, errors_count, throttled, detail FROM sync_runs WHERE user_id=? "
+                        " conflicts, errors_count, throttled, detail, service_mode FROM sync_runs WHERE user_id=? "
                         "ORDER BY id DESC LIMIT ?", (uid, limit))
 
     def open_issue(self, uid: str | None, type_: str, severity: str, summary: str) -> bool:

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from odnas import db as D
-from odnas import settings_store
+from odnas import service_mode, settings_store
 from odnas.bisync import render_filters
 from odnas.config import TOKEN_MODE_BROKER, Config
 from odnas.crypto import Keyring
@@ -207,7 +207,10 @@ class Worker:
         self.db.update_flag(D.NAS_GLOBAL_PAUSE, last_test_at=D.iso(now), last_test_pw=pw_ver)
         self.db.beat("nas_svc_test", json.dumps({"result": res.status, "at": D.iso(now), "pw_version": pw_ver}))
         # the same mount is also this interval's health check (no second mount in the same tick)
-        self.db.beat("nas_health", json.dumps({"result": res.status, "at": D.iso(now), "share": s.nas_health_share}))
+        self.db.beat("nas_health", json.dumps({"result": res.status, "at": D.iso(now), "share": s.nas_health_share,
+                                               "fails": 0 if res.status == V_OK else
+                                               json.loads((self.db.heartbeat("nas_health") or {"detail": "{}"})["detail"]
+                                                          or "{}").get("fails", 0)}))
         if res.status == V_OK:
             self.db.clear_flag(D.NAS_GLOBAL_PAUSE)
             self.db.audit("system", "nas_global_pause_cleared", "",
@@ -236,16 +239,20 @@ class Worker:
         if last is not None and now - last < timedelta(minutes=NAS_HEALTH_INTERVAL_MIN):
             return
         res = self.provider_factory().test_mount()
-        self.db.beat("nas_health", json.dumps({"result": res.status, "at": D.iso(now), "share": s.nas_health_share}))
+        prev = json.loads(hb["detail"]).get("fails", 0) if hb and hb["detail"] else 0
+        fails = 0 if res.status in (V_OK, V_AUTH_FAILED) else prev + 1
+        self.db.beat("nas_health", json.dumps({"result": res.status, "at": D.iso(now), "share": s.nas_health_share,
+                                               "fails": fails}))
         rec = _recipients(s)
         if res.status == V_OK:
             self.alerter.resolve(None, "nas_health")
         elif res.status == V_AUTH_FAILED:
+            # a password rejection goes straight to the global NAS pause and its high alert (SPEC v0.8 §10.2)
             set_nas_global_pause(self.db, self.alerter, rec, None, None, source="health_check")
-        else:
+        elif fails >= 2:   # SPEC v0.8: medium only after 2 consecutive failures (~30 min)
             self.alerter.raise_(Alert("nas_health", "medium",
-                                      f"NAS health check failed ({res.status}) on share {s.nas_health_share}", None),
-                                rec)
+                                      f"NAS health check failed {fails} times in a row ({res.status}) on share "
+                                      f"{s.nas_health_share}", None), rec)
 
     def tick(self, now: datetime | None = None, wait: bool = False) -> list[tuple[str, str]]:
         now = now or D.utcnow()
@@ -258,6 +265,7 @@ class Worker:
                 self.db.update_profile(u["id"], slot_offset_min=offsets[u["id"]])
         self._staleness(users, s, now)
         expire_accept_approvals(self.db, self.alerter, s, now)
+        service_mode.expire(self.db, self.alerter, now, s)
         self._tonight_holds(users, s, now)
         nas_paused = self._nas_global_pause(s, now)
         if not nas_paused:

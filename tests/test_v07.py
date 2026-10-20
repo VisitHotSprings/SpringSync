@@ -87,12 +87,15 @@ def test_routine_health_check_option_b(cfg, db, kr, entra):
     t0 = D.utcnow()
     w.tick(t0, wait=True)
     assert hr.uncs == [("verify", HEALTH_UNC)]
-    assert any(i["type"] == "nas_health" and i["severity"] == "medium" for i in db.open_issues())
+    assert not any(i["type"] == "nas_health" for i in db.open_issues())   # SPEC v0.8: one failure, no alert
     w.tick(t0 + timedelta(minutes=5), wait=True)
     assert len(hr.uncs) == 1                                    # every 15 min, not every tick
+    w.tick(t0 + timedelta(minutes=16), wait=True)               # 2nd consecutive failure -> medium
+    assert any(i["type"] == "nas_health" and i["severity"] == "medium" for i in db.open_issues())
     hr.codes["verify"] = 0
-    w.tick(t0 + timedelta(minutes=16), wait=True)
-    assert len(hr.uncs) == 2 and not any(i["type"] == "nas_health" for i in db.open_issues())
+    w.tick(t0 + timedelta(minutes=32), wait=True)
+    assert len(hr.uncs) == 3 and not any(i["type"] == "nas_health" for i in db.open_issues())
+    assert json.loads(db.heartbeat("nas_health")["detail"])["fails"] == 0
     assert json.loads(db.heartbeat("nas_health")["detail"])["result"] == "ok"
     assert db.flag(D.NAS_GLOBAL_PAUSE) is None
 
