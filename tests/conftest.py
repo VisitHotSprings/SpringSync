@@ -118,6 +118,7 @@ class FakeHelperRunner:
     def __init__(self, codes=None, mnt_root=None):
         self.codes = codes or {}
         self.calls = []
+        self.uncs = []          # (action, UNC) the helper would have mounted
         self.mnt_root = mnt_root
 
     def __call__(self, cmd):
@@ -129,6 +130,7 @@ class FakeHelperRunner:
             f = d / ident
             assert oct(f.stat().st_mode & 0o777) == "0o600"
             cred = f.read_text()
+            self.uncs.append((action, (d / f"{ident}.unc").read_text().strip()))
         self.calls.append((action, ident, cred))
         code = self.codes.get(action, 0)
         if action == "mount" and code == 0 and self.mnt_root:

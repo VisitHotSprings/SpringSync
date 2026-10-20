@@ -152,10 +152,25 @@ class SharedHomeProvider:
     per_user_credentials = False
 
     def __init__(self, cfg: Config, helper: MountHelperClient, host: str, template: str,
-                 svc_user: str, svc_password: str, domain: str = ""):
+                 svc_user: str, svc_password: str, domain: str = "", health_share: str = "Sync-Health"):
         self.cfg, self.helper, self.host, self.template = cfg, helper, host, template
         self.svc = (svc_user, svc_password)
         self.domain = domain
+        self.health_share = health_share
+
+    @property
+    def health_unc(self) -> str:
+        return f"//{self.host}/{self.health_share}"
+
+    def test_mount(self) -> VerifyResult:
+        """SPEC v0.7: read-only test mount of the dedicated health-check share with svc-sync (helper
+        `verify`: ro mount, list root, unmount). Used after a svc-sync password change and by the periodic
+        NAS health check; never touches a user's Home share."""
+        try:
+            code, msg = self.helper.call("verify", str(uuidlib.uuid4()), self.health_unc, *self.svc, self.domain)
+        except ValueError as e:
+            return VerifyResult(V_ERROR, str(e))
+        return VerifyResult(_status(code), msg)
 
     def unc_for(self, local_name: str) -> str:
         return f"//{self.host}/{self.template.replace('{user}', local_name)}"
@@ -180,14 +195,15 @@ class SharedHomeProvider:
 
     def describe(self) -> dict:
         return {"option": "B", "label": "Home-<user> shared drive per person, one svc-sync login",
-                "unc": self.unc_for("<user>"), "per_user_credentials": False, "persistent_mounts": True}
+                "unc": self.unc_for("<user>"), "per_user_credentials": False, "persistent_mounts": True,
+                "health_unc": self.health_unc}
 
 
 def provider_from_settings(cfg: Config, s, helper: MountHelperClient | None = None) -> NasAccessProvider:
     helper = helper or MountHelperClient(cfg)
     if s.nas_option == "B":
         return SharedHomeProvider(cfg, helper, s.nas_host, s.nas_shared_template, s.nas_svc_username,
-                                  s.secret("nas_svc_password"), s.nas_domain)
+                                  s.secret("nas_svc_password"), s.nas_domain, s.nas_health_share)
     return PersonalDriveProvider(cfg, helper, s.nas_host, s.nas_share, s.nas_domain)
 
 

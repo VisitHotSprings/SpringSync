@@ -66,6 +66,24 @@ class HttpWorkerClient:
             return V_ERROR
 
 
+def svc_test_status(db: D.DB) -> dict | None:
+    """SPEC v0.7 §6.4: state of the svc-sync password test shown on Settings.
+    - 'testing': a new nas_svc_password was saved while the global pause is set and the worker has not
+      reported a final result for it yet (its next tick, <= 60 s; an unreachable NAS keeps it testing);
+    - 'ok' / 'rejected': the result of the last test of the CURRENT password; None otherwise."""
+    cur = db.setting_version("nas_svc_password")
+    hb = db.heartbeat("nas_svc_test")
+    last = json.loads(hb["detail"]) if hb and hb["detail"] else {}
+    f = db.flag(D.NAS_GLOBAL_PAUSE)
+    if f is not None and cur and cur not in (f.get("pw_version"), f.get("tested_pw_version")):
+        return {"state": "testing", "retrying": last.get("pw_version") == cur and last.get("result") != "ok",
+                "last_result": last.get("result") if last.get("pw_version") == cur else None}
+    if last and last.get("pw_version") == cur:
+        return {"state": "ok" if last["result"] == "ok" else "rejected" if last["result"] == "auth_failed"
+                else last["result"], "at": last.get("at")}
+    return None
+
+
 def local_time(v: str | None) -> str:
     if not v:
         return "never"
@@ -349,7 +367,7 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         set_flags = {k: bool(db.one("SELECT 1 FROM settings WHERE key=? AND is_secret=1", (k,)))
                      for k, sp in settings_store.SPECS.items() if sp.secret}
         return render(request, "admin_settings.html", sess, s=s, specs=settings_store.SPECS, set_flags=set_flags,
-                      nas_pause=db.flag(D.NAS_GLOBAL_PAUSE),
+                      nas_pause=db.flag(D.NAS_GLOBAL_PAUSE), svc_test=svc_test_status(db),
                       msg=request.query_params.get("msg", ""), err=request.query_params.get("err", ""))
 
     @adm.post("/settings")

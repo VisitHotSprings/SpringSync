@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.7.0 (unreleased, lab build, 2026-10-20). Follows SPEC.md v0.7
+### Added
+- **Health-check share:** new setting `nas_health_share` (NAS group, default `Sync-Health`, share-name
+  validated). It is a svc-sync-only NAS share. `SharedHomeProvider.test_mount()` does a read-only helper
+  `verify` of `//<nas>/<nas_health_share>` with svc-sync.
+- **Routine NAS health check (Option B):** every 15 min (`NAS_HEALTH_INTERVAL_MIN`), never while
+  `nas_global_pause` is set.
+  - OK → closes the `nas_health` alert.
+  - Unreachable/error → `medium` `nas_health` alert.
+  - Rejected login → sets `nas_global_pause` (`source: health_check`, audited, one `high` alert, no retry).
+  - Result is in the `nas_health` heartbeat. Not run under Option A.
+- **Settings "Testing new password…":** shown while the global pause is set and the newly saved
+  `nas_svc_password` has no final result. The page refreshes every 10 s (meta refresh, no script; CSP
+  unchanged). It then shows **"test mount OK … syncing has resumed"** or **"rejected … will not be
+  retried"**. An unreachable NAS keeps it testing, with "retrying every 5 min". The result comes from the
+  `nas_svc_test` heartbeat (result, time, opaque password version; never the secret).
+- `odnas nas-info`: prints non-secret NAS settings (option, health share, whether it was configured).
+- **install.sh step 13** prints a reminder when the health share isn't configured: Option B only, create it,
+  NAS change, **needs Mark's OK**, the installer does not create it. It never runs NAS-side commands (a
+  test checks this).
+- **docs/DEPLOY.md:** new "NAS install steps (manual; NOT done by install.sh)" section, flagged **needs
+  Mark's OK**: create `Sync-Health`, svc-sync-only, no user data.
+- Tests: 259 total (55 smoke, 9 integration against real rclone v1.75.2). The test helper now records the
+  UNC of each mount/verify.
+
+### Changed
+- The pause-clearing test mount uses the health share instead of the first user's `Home-<user>` share, so
+  `nas_global_pause` can clear with **zero users**. The same mount also counts as that interval's health
+  check (no second mount). Audit `nas_global_pause_cleared` records `test_share`.
+- Accepted as built (SPEC v0.7), now with tests:
+  - an offboarding final sync waits for the pause (offboarding without a final sync proceeds);
+  - switching to Option A clears the pause (audited);
+  - an automatic re-queue keeps `tonight_hold_nights`.
+- No schema change (still migration 6). Version 0.7.0 (User-Agent `…|SpringSync/0.7`).
+
 ## 0.6.0 (unreleased, lab build, 2026-10-20). Follows SPEC.md v0.6
 ### Changed
 - **Onboarding complete** stays "first successful normal bisync" (`onboarding_completed_at`); a Restore or

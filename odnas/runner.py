@@ -554,14 +554,16 @@ def apply_outcome(db: D.DB, alerter: Alerter, s, uid: str, kind: str, run_id: in
     db.audit("system", f"run_{kind}", uid, {"run_id": run_id, "result": oc.result, "exit_code": exit_code})
 
 
-def set_nas_global_pause(db: D.DB, alerter: Alerter, rec: list[str], uid: str | None, run_id: int | None) -> bool:
+def set_nas_global_pause(db: D.DB, alerter: Alerter, rec: list[str], uid: str | None, run_id: int | None,
+                         source: str = "run") -> bool:
     """SPEC v0.6: one server-wide NAS pause for a rejected Option B svc-sync login. Idempotent: concurrent
     runs that hit the same rejection add no second alert or audit entry."""
     new = db.set_flag(D.NAS_GLOBAL_PAUSE, "svc-sync NAS login rejected",
-                      pw_version=db.setting_version("nas_svc_password"), first_user=uid, run_id=run_id)
+                      pw_version=db.setting_version("nas_svc_password"), first_user=uid, run_id=run_id,
+                      source=source)
     if new:
         db.audit("system", "nas_global_pause_set", uid or "",
-                 {"reason": "svc_sync_login_rejected", "run_id": run_id})
+                 {"reason": "svc_sync_login_rejected", "run_id": run_id, "source": source})
         alerter.raise_(Alert("nas_global_pause", "high",
                              "NAS svc-sync login rejected: all NAS syncs paused (no retries). "
                              "Update the svc-sync password in Settings; a test mount then resumes syncing.", None),

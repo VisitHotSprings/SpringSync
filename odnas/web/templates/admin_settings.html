@@ -1,5 +1,10 @@
 {% extends "base.html" %}{% block body %}
 <h1>Settings</h1>
+{% if svc_test and svc_test.state == 'testing' %}<meta http-equiv="refresh" content="10">
+<p class="banner warn" id="svc-test"><strong>Testing new password…</strong> The worker test-mounts the health-check share ({{ s.nas_health_share }}) on its next check (within 60 s).{% if svc_test.retrying %} The NAS was unreachable on the last try; retrying every 5 min.{% endif %}</p>
+{% elif svc_test and svc_test.state == 'ok' %}<p class="banner ok" id="svc-test">New svc-sync password: test mount OK ({{ svc_test.at|local }}).{% if not nas_pause %} NAS syncing has resumed.{% endif %}</p>
+{% elif svc_test and svc_test.state == 'rejected' %}<p class="banner critical" id="svc-test">New svc-sync password: <strong>rejected</strong> by the NAS ({{ svc_test.at|local }}). It will not be retried; enter the correct password.</p>
+{% endif %}
 {% if nas_pause %}<p class="banner critical"><strong>All NAS syncs are paused</strong> since {{ nas_pause.set_at|local }}: {{ nas_pause.reason }}. Save the correct svc-sync password below; the worker then runs a test mount within 60 s and, if it succeeds, resumes syncing (audited). A rejected password is not retried.</p>{% endif %}
 {% if msg %}<p class="msg">{{ msg }}</p>{% endif %}{% if err %}<p class="msg err">{{ err }}</p>{% endif %}
 <p><small>Changes apply on the worker's next tick (within 60 s). Every change is audited. Secret fields can only be replaced, never viewed.

@@ -51,6 +51,23 @@ The GUI shows the running version but never triggers an update (SPEC §11.4).
 - Members of `adm` (Walter, via `LOG_READERS`) can read both. Audit entries are also written to syslog as
   `<slug>-audit`.
 
+## NAS install steps (manual; NOT done by install.sh)
+
+> **Needs Mark's OK** (through Todd) before anyone does it: these are NAS changes. The installer only
+> prints a reminder; no SpringSync code ever creates shares or changes NAS permissions.
+
+1. **Option B only: create the health-check share** (SPEC v0.7 §11.1), **needs Mark's OK**.
+   - On UNAS #1, create a small share, default name `Sync-Health`. It holds no user data (an empty share,
+     or a single README, is enough).
+   - Permissions: **`svc-sync` only** (read is enough; the test is a read-only mount that lists the root).
+     No user or group access.
+   - If you pick another name, enter it in **Settings → NAS → Health-check share** (`nas_health_share`).
+   - It is used for (a) the test mount after a new `svc-sync` password is saved (this clears
+     `nas_global_pause`, even with zero users) and (b) the routine NAS health check every 15 min. Neither
+     ever touches a user's `Home-<user>` share.
+2. Option B: the `Home-<user>` shares and the `svc-sync` account itself (SPEC §4.2), also NAS changes that
+   need Mark's OK.
+
 ## CIFS mounts
 - The worker never writes fstab. Each run calls the helper, which mounts:
   - Option A: `//<nas>/<share>` with the user's credentials;

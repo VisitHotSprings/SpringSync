@@ -143,6 +143,9 @@ SPECS: dict[str, Spec] = {
     "nas_svc_username": Spec("NAS", "svc-sync username (option B)", _free, "svc-sync"),
     "nas_svc_password": Spec("NAS", "svc-sync password (option B)", _free, "", secret=True),
     "nas_domain": Spec("NAS", "SMB domain (usually empty)", _free, ""),
+    "nas_health_share": Spec("NAS", "Health-check share (option B; svc-sync only)", _share, "Sync-Health",
+                             help="Used for the svc-sync test mount after a password change and the periodic NAS "
+                                  "health check. Only svc-sync may reach it; no user's Home share is touched."),
     # Schedule
     "default_interval_min": Spec("Schedule", "Default interval (minutes)", _int(15, 1440), 30),
     "active_hours": Spec("Schedule", "Active hours (America/Chicago)", _hours, ""),

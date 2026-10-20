@@ -82,7 +82,7 @@ flowchart LR
 | exit 1, 3, 4, 5, 6, 8, 10, or killed by a signal | `retryable` |
 | NAS mount failed, rclone never started (SPEC v0.4) | `retryable`, but **outside** the same-error chain (neither counts nor resets it); separate counter, admin alert after 2 in a row, no lockout. Only a **successful mount** resets the counter (v0.5) |
 | NAS rejected the login (wrong password), Option A | `nas_auth` → that user `nas_auth_failed`: paused at once, no retries, own alert; leaves the mount-failure counter unchanged (v0.5) |
-| NAS rejected the shared `svc-sync` login, Option B (v0.6) | `nas_auth` → **one server-wide NAS pause** (`worker_state` row `nas_global_pause`), one `high` alert, no retries, no user state changed; banner on the admin dashboard, Settings and auditor view. Clears automatically once a new `nas_svc_password` is saved and a test mount with it succeeds (a rejected new password is never retried) |
+| NAS rejected the shared `svc-sync` login, Option B (v0.6) | `nas_auth` → **one server-wide NAS pause** (`worker_state` row `nas_global_pause`), one `high` alert, no retries, no user state changed; banner on the admin dashboard, Settings and auditor view. Clears automatically once a new `nas_svc_password` is saved and a test mount with it succeeds (a rejected new password is never retried). The test mount (worker's next tick, ≤60 s; Settings shows "Testing new password…") and the routine 15-min NAS health check both use the svc-sync-only **health-check share** (`nas_health_share`, default `Sync-Health`), never a user's `Home-<user>` share. Creating that share is a manual NAS step that needs Mark's OK (docs/DEPLOY.md); `install.sh` only prints a reminder |
 
 Value names (`users.state`, `sync_runs.result`, `sync_runs.kind`) match SPEC v0.4 §5 exactly; a test
 compares the code's lists with the spec text.
@@ -183,7 +183,7 @@ sudo REPO_URL=git@github.com:<OWNER>/<REPO>.git TENANT_ID=... CLIENT_ID=... \
      GROUP_USERS=... GROUP_ADMINS=... GROUP_AUDITORS=... \
      SYNC_HOST=sync.hotsprings.org GCP_ACME_PROJECT=... ACME_ZONE=... \
      LAN_CIDRS="10.0.0.0/16" ADMIN_CIDR="10.0.10.0/24" LOG_READERS="walter" \
-     ./deploy/install.sh --version v0.6.0           # add --dry-run to see the plan first
+     ./deploy/install.sh --version v0.7.0           # add --dry-run to see the plan first
 ```
 `install.sh` is idempotent: every step checks state first, and it never overwrites keys, the DB, or settings.
 It handles:

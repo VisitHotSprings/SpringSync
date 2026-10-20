@@ -26,6 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     b = sub.add_parser("backup"); b.add_argument("--tag", default="")
     sub.add_parser("db-upgrade")
     sub.add_parser("check-config")
+    sub.add_parser("nas-info")
     sub.add_parser("verify-audit")
     n = sub.add_parser("notify"); n.add_argument("--unit", required=True)
     sub.add_parser("rekey")
@@ -94,6 +95,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ok: {cfg.product_name} slug={cfg.slug} token_mode={cfg.token_mode} credential={cfg.credential_type} "
               f"key_id={kr.primary_id} schema={db.schema_version()}")
         return 0
+    if a.cmd == "nas-info":
+        print(nas_info(*_nas_ctx()))
+        return 0
     if a.cmd == "verify-audit":
         _, db, _ = _ctx()
         ok, n, msg = db.verify_audit_chain()
@@ -110,3 +114,18 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(rekey_all(db, kr)))
         return 0
     return 2
+
+
+def _nas_ctx():
+    from odnas import db as D
+    from odnas.config import load_config
+    cfg = load_config()
+    return D.DB(cfg.p_db), cfg
+
+
+def nas_info(db, cfg) -> str:
+    """Non-secret NAS settings for install.sh's reminder (SPEC v0.7 §11.2 step 13). Never decrypts."""
+    from odnas import settings_store
+    s = settings_store.load(db, cfg)
+    saved = db.one("SELECT 1 FROM settings WHERE key='nas_health_share'") is not None
+    return f"option={s.nas_option} health_share={s.nas_health_share} health_share_configured={int(saved)}"

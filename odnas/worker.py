@@ -4,6 +4,7 @@ mount helper."""
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import shutil
 import signal
@@ -22,11 +23,12 @@ from odnas.entra import EntraClient
 from odnas.nas import V_AUTH_FAILED, V_OK, MountHelperClient, NasAccessProvider, provider_from_settings
 from odnas.notify import Alert, Alerter, Notifier
 from odnas.runner import (JobRunner, ProcessRunner, _recipients, accept_expired, expire_accept_approvals,
-                          sweep_runtime)
+                          set_nas_global_pause, sweep_runtime)
 from odnas.scheduler import (ThrottleGovernor, assign_offsets, in_window, seconds_until_window_end,
                              weekly_check_due)
 from odnas.tokens import BrokerTokenStrategy, TmpfsConfigStrategy, TokenBroker
 
+NAS_HEALTH_INTERVAL_MIN = 15   # SPEC v0.7 health check (Option B)
 log = logging.getLogger("odnas.worker")
 
 
@@ -201,17 +203,16 @@ class Worker:
         last = D.parse_iso(f.get("last_test_at"))
         if f.get("last_test_pw") == pw_ver and last is not None and now - last < timedelta(minutes=5):
             return True
-        probe = next((u for u in self.db.users() if u["state"] not in (D.REMOVED, D.OFFBOARDING, D.INVITED)
-                      and u["local_name"]), None)
-        if probe is None:
-            return True   # nothing to test against yet; stays paused
-        res = self.provider_factory().verify(probe["local_name"], "")
+        res = self.provider_factory().test_mount()     # SPEC v0.7: the health-check share, never a Home share
         self.db.update_flag(D.NAS_GLOBAL_PAUSE, last_test_at=D.iso(now), last_test_pw=pw_ver)
+        self.db.beat("nas_svc_test", json.dumps({"result": res.status, "at": D.iso(now), "pw_version": pw_ver}))
+        # the same mount is also this interval's health check (no second mount in the same tick)
+        self.db.beat("nas_health", json.dumps({"result": res.status, "at": D.iso(now), "share": s.nas_health_share}))
         if res.status == V_OK:
             self.db.clear_flag(D.NAS_GLOBAL_PAUSE)
             self.db.audit("system", "nas_global_pause_cleared", "",
                           {"reason": "svc_sync_password_updated_and_test_mount_ok", "paused_since": f["set_at"],
-                           "test_share_user": probe["id"]})
+                           "test_share": s.nas_health_share})
             self.alerter.resolve(None, "nas_global_pause")
             return False
         if res.status == V_AUTH_FAILED:
@@ -223,6 +224,28 @@ class Worker:
         else:
             self.db.audit("system", "nas_global_pause_test_failed", "", {"result": res.status, "retry": "5 min"})
         return True
+
+    def _nas_health(self, s, now: datetime) -> None:
+        """SPEC v0.7: periodic NAS health check (Option B) = read-only svc-sync test mount of the health-check
+        share every NAS_HEALTH_INTERVAL_MIN. Not run while the global pause is set (its own test handles
+        that, without retrying a rejected password). A rejected svc-sync login sets the global pause."""
+        if s.nas_option != "B":
+            return
+        hb = self.db.heartbeat("nas_health")
+        last = D.parse_iso(json.loads(hb["detail"]).get("at")) if hb and hb["detail"] else None
+        if last is not None and now - last < timedelta(minutes=NAS_HEALTH_INTERVAL_MIN):
+            return
+        res = self.provider_factory().test_mount()
+        self.db.beat("nas_health", json.dumps({"result": res.status, "at": D.iso(now), "share": s.nas_health_share}))
+        rec = _recipients(s)
+        if res.status == V_OK:
+            self.alerter.resolve(None, "nas_health")
+        elif res.status == V_AUTH_FAILED:
+            set_nas_global_pause(self.db, self.alerter, rec, None, None, source="health_check")
+        else:
+            self.alerter.raise_(Alert("nas_health", "medium",
+                                      f"NAS health check failed ({res.status}) on share {s.nas_health_share}", None),
+                                rec)
 
     def tick(self, now: datetime | None = None, wait: bool = False) -> list[tuple[str, str]]:
         now = now or D.utcnow()
@@ -237,6 +260,9 @@ class Worker:
         expire_accept_approvals(self.db, self.alerter, s, now)
         self._tonight_holds(users, s, now)
         nas_paused = self._nas_global_pause(s, now)
+        if not nas_paused:
+            self._nas_health(s, now)
+            nas_paused = self.db.flag(D.NAS_GLOBAL_PAUSE) is not None
         if self.draining():
             return []
         cap = self.governor.max_concurrent(now, s.max_concurrent)

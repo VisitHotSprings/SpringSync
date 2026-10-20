@@ -253,6 +253,22 @@ if (( ! DRY )); then
   curl -fsS http://127.0.0.1:8080/healthz && echo
   /usr/local/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null && echo "    caddy config valid"
 fi
+# SPEC v0.7 §11.1/§11.2 step 13: the Sync-Health share is a NAS change (needs Mark's OK). The installer
+# NEVER creates it or touches the NAS; it only reminds, when the health share isn't configured yet.
+NASINFO="option=? health_share=Sync-Health health_share_configured=0"
+if (( ! DRY )); then
+  NASINFO="$(sudo -u "$SLUG" ODNAS_CONFIG="$ETC/$SLUG.toml" "$OPT/current/venv/bin/odnas" nas-info 2>/dev/null || echo "$NASINFO")"
+fi
+case "$NASINFO" in
+  *health_share_configured=1*) : ;;
+  *) cat <<SHARE
+REMINDER (Option B only): the NAS health-check share is not configured yet.
+  * Create a small share (default name Sync-Health) on UNAS #1, reachable ONLY by svc-sync, no user data.
+  * This is a NAS change and needs Mark's OK (through Todd) first. This installer does not create it.
+  * Then enter its name in Settings (nas_health_share) if it isn't the default. See docs/DEPLOY.md.
+SHARE
+  ;;
+esac
 cat <<NEXT
 Next steps:
   * The TLS certificate is issued on Caddy's first start (needs the CNAME + ACME SA in place; test T-C1 first).

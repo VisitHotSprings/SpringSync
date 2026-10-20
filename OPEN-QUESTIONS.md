@@ -122,31 +122,33 @@ Also not covered by local tests:
 - ~~`nas_auth` under Option B~~: one global NAS pause, one high alert, no retries, auto-resume after a new
   password and a good test mount.
 
-### Still open or ambiguous (v0.6)
+### Resolved by SPEC v0.7 (closed)
+- ~~When the svc-sync test mount runs~~: the worker's next tick (≤60 s); Settings shows "Testing new password…".
+- ~~What gets test-mounted~~: the svc-sync-only health-check share (`nas_health_share`, default `Sync-Health`).
+- ~~Offboarding during the pause / switching to A / hold count across re-queue~~: accepted as built.
+
+### Still open or ambiguous (v0.7)
 1. **§14.13: may IT admins see file names in the Accept-deletes list?** Walter has to sign off. **This
    stays OPEN and is going to Mark via Gidget.** Until then the list has its own IT-admin-only page,
    Auditors and Users get 403, every view is audited, and everything else carries counts only.
-2. **Re-queued tonight Restores share the window** (one resync at a time). Accepted for the pilot unless
-   Mark objects. Same for: the onboarding Restore follows the onboarding resync rules, and the 30-min cutoff
-   applies only to tonight Restores.
-3. **Global NAS pause: when the test mount runs.** SPEC §6.4 says saving the password "runs a test mount".
-   The build runs it on the worker's next tick (within 60 s), because only the worker holds the mount
-   helper. The Settings banner says so. Confirm, or add a synchronous test on save.
-4. **Global NAS pause: what is test-mounted.** One `verify` against the first existing (not removed,
-   offboarding or invited) user's `Home-<user>` share. With no such user it stays paused. A dedicated test
-   share would avoid depending on one user's share existing.
-5. **Global NAS pause: a NAS-unreachable test** is retried every 5 min (no logon was attempted, so there is
-   no lockout risk). A rejected new password is never retried; IT has to save another one.
-6. **Global NAS pause and offboarding.** Offboarding with a requested final sync waits for the pause to
-   clear. Without a final sync it proceeds (crypto-erase and unmount only). Confirm.
-7. **Global NAS pause cleared by switching to Option A.** Not in the spec; the build clears it (audited),
-   since the svc-sync login no longer applies.
-8. **Hold count across the automatic re-queue.** The re-queue counts as the same Restore, so a re-queued
-   Restore held once is at `low` and a second hold is `medium`. A new admin click resets it.
-9. **Lockout under `--resilient`** still isn't reproducible locally. The integration test drops
+2. **Creating `Sync-Health` (and the Option B shares and svc-sync account) needs Mark's OK.** It is a NAS
+   change, documented in docs/DEPLOY.md and not done. Until it exists under Option B, the routine health
+   check reports the share as unreachable/error (`medium` alert) and a pause can't clear.
+3. **Health-check interval** is 15 min, my choice (the spec gives none). It isn't a setting. Its alert is
+   `medium` from the first failure (no "2 in a row" rule like mount failures). Confirm.
+4. **Health check under Option A.** There is no svc-sync, so there is no health check. The NAS is only
+   seen through users' runs (mount-failure counter). Confirm that Option A needs nothing more.
+5. **A missing health share vs. a rejected password.** If the share doesn't exist, the NAS may answer with
+   an error the helper maps to `error`/`unreachable` (not a logon failure). The pause then keeps
+   "testing" with 5-min retries. The exact CIFS error codes need lab test T-N2.
+6. **The health check could, in theory, set the pause on a transient logon error.** It is treated like a
+   run's rejection: no retry until a new password is saved. That is the same rule as runs.
+7. **Shared tonight window** (one resync at a time), onboarding Restore rules, and the 30-min cutoff only
+   for tonight Restores: accepted for the pilot unless Mark objects.
+8. **Lockout under `--resilient`** still isn't reproducible locally. The integration test drops
    `--resilient`. A T-B* lab test should capture a real one.
-10. **`caddy build-info` format** (used by the plugin-pin check) is untested until T-C1.
-11. **Worker hardening:** `NoNewPrivileges` is off because the worker needs sudo. A socket-activated helper
+9. **`caddy build-info` format** (used by the plugin-pin check) is untested until T-C1.
+10. **Worker hardening:** `NoNewPrivileges` is off because the worker needs sudo. A socket-activated helper
     would allow it.
-12. **The internal web→worker token** is HMAC-derived from the data key, not a separate secret.
-13. **Option B "mounted persistently"** is per-run idempotent mounts. A boot-time mount unit is not built.
+11. **The internal web→worker token** is HMAC-derived from the data key, not a separate secret.
+12. **Option B "mounted persistently"** is per-run idempotent mounts. A boot-time mount unit is not built.
