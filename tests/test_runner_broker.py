@@ -124,6 +124,22 @@ def test_preflight_report_only_counts_in_db(cfg, db, kr, entra):
     assert oct(rep.stat().st_mode & 0o777) == "0o600" and "CON.txt" in rep.read_text()
 
 
+def test_preflight_quota_from_rclone_about(cfg, db, kr, entra):
+    class QuotaProc(FakeProc):
+        def run(self, cmd, env, timeout_s, capture=False, stderr_path=None):
+            from odnas.runner import ProcResult
+            self.calls.append((cmd, timeout_s))
+            if "about" in cmd:
+                return ProcResult(0, False, json.dumps({"total": 1000, "free": 10}))
+            return ProcResult(0, False, json.dumps([{"Path": "big.bin", "Size": 500}]))
+    proc = QuotaProc()
+    w, _ = make_worker(cfg, db, kr, entra, proc)
+    uid = seed_user(db, kr, state=D.ONBOARDING, preflight_requested=1)
+    w.runner.run(uid, "preflight")
+    assert any("about" in c for c, _ in proc.calls)
+    assert "onedrive_quota" in db.user_full(uid)["preflight_summary"]
+
+
 # ---- broker ------------------------------------------------------------
 
 def test_broker_rotates_and_persists(cfg, db, kr, entra):

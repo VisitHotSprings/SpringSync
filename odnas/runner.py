@@ -168,7 +168,15 @@ class JobRunner:
             if pr.exit_code != 0:
                 return self._finish(uid, "preflight", run_id, Outcome(R_RETRY, f"listing {side} failed"), Stats(), s)
             listings[side] = json.loads(pr.stdout or "[]")
-        rep = scan(listings)
+        quota = None
+        pa = self.proc.run([self.cfg.rclone_bin, "about", f"od-{uid}:", "--json", "--config", jp.config_path,
+                            "--user-agent", self.cfg.user_agent], env, 300, capture=True)
+        try:
+            about = json.loads(pa.stdout or "{}")
+            quota = int(about["free"]) if isinstance(about, dict) and "free" in about else None
+        except (ValueError, TypeError):
+            quota = None
+        rep = scan(listings, quota_remaining=quota)
         out = Path(self.cfg.p_state) / "preflight" / f"{uid}.json"
         write_private(out, json.dumps({"counts": rep.counts(), "total_bytes": rep.total_bytes,
                                        "findings": [f.__dict__ for f in rep.findings]}, indent=1))
