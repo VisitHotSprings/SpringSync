@@ -1,0 +1,10 @@
+# runtime
+fastapi
+uvicorn
+jinja2
+python-multipart
+msal
+cryptography
+httpx
+# smoke tests run by deploy/update.sh against the new venv
+pytest

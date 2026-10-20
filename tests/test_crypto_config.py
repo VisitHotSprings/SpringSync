@@ -5,6 +5,8 @@ from odnas.crypto import InvalidTag, Keyring, new_data_key
 from odnas.rekey import rekey_all
 from tests.conftest import CANARY_PW, CANARY_RT, CLIENT, TENANT, seed_user
 
+pytestmark = pytest.mark.smoke
+
 
 def test_roundtrip_and_aad_binding():
     kr = Keyring(new_data_key())

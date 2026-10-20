@@ -1,0 +1,7 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "test canaries and placeholders"
+regexes = ['''CANARY-[A-Z-]+-do-not-leak-[0-9a-f]+''', '''00000000-0000-0000-0000-000000000000''']
+paths = ['''requirements\.lock''']

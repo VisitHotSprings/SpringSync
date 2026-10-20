@@ -1,0 +1,11 @@
+[Unit]
+Description=@PRODUCT@ failure alert for %i
+
+[Service]
+Type=oneshot
+User=@SLUG@
+Group=@SLUG@
+Environment=ODNAS_CONFIG=/etc/@SLUG@/@SLUG@.toml
+LoadCredentialEncrypted=data.key:/etc/@SLUG@/creds/data.key.cred
+# v0.1: opens a critical issue on the admin page. Email delivery is a stub (SPEC §14.5 open).
+ExecStart=/opt/@SLUG@/current/venv/bin/odnas notify --unit %i

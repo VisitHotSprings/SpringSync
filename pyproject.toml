@@ -1,0 +1,16 @@
+[project]
+name = "odnas"
+version = "0.1.0"
+description = "Per-user two-way OneDrive <-> UniFi NAS home-folder sync (working name SpringSync)"
+requires-python = ">=3.12"
+
+[project.scripts]
+odnas = "odnas.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "smoke: fast subset run by deploy/update.sh against a new release venv",
+  "integration: needs the real rclone binary (skipped if absent)",
+]
+filterwarnings = ["ignore::DeprecationWarning", "ignore:Using `httpx`"]

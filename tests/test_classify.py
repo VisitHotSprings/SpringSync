@@ -5,6 +5,8 @@ import pytest
 from odnas.classify import (R_AUTH, R_CRITICAL, R_ERROR, R_OK, R_RETRY, R_TIMEOUT, classify, parse_json_log)
 from odnas.entra import AUTH_CA, AUTH_OK, AUTH_REAUTH, AUTH_TRANSIENT, TokenResult, classify_auth_error
 
+pytestmark = pytest.mark.smoke
+
 
 def jl(*objs):
     return "\n".join(json.dumps(o) for o in objs)

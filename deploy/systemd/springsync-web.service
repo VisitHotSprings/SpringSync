@@ -1,0 +1,37 @@
+[Unit]
+Description=@PRODUCT@ web (FastAPI, loopback only)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+OnFailure=@SLUG@-alert@%n.service
+
+[Service]
+Type=simple
+User=@SLUG@
+Group=@SLUG@
+Environment=ODNAS_CONFIG=/etc/@SLUG@/@SLUG@.toml
+ExecStart=/opt/@SLUG@/current/venv/bin/odnas web --bind 127.0.0.1:8080
+LoadCredentialEncrypted=data.key:/etc/@SLUG@/creds/data.key.cred
+LoadCredentialEncrypted=entra-app.key:/etc/@SLUG@/creds/entra-app.key.cred
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+# hardening (SPEC §7.4)
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/@SLUG@/db
+
+[Install]
+WantedBy=multi-user.target

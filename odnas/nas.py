@@ -24,7 +24,7 @@ from odnas.tokens import shred, write_private
 H_OK, H_USAGE, H_OTHER, H_UNREACHABLE, H_AUTH = 0, 2, 3, 4, 13
 
 V_OK, V_AUTH_FAILED, V_UNREACHABLE, V_ERROR = "ok", "auth_failed", "unreachable", "error"
-UNC_RE = re.compile(r"^//[A-Za-z0-9.-]{1,253}/[A-Za-z0-9][A-Za-z0-9 _.-]{0,79}$")
+UNC_RE = re.compile(r"^//[A-Za-z0-9.-]{1,253}/[A-Za-z0-9][A-Za-z0-9 _.-]{0,79}\Z")
 
 
 @dataclass

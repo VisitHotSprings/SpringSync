@@ -9,6 +9,8 @@ from odnas.bisync import FORBIDDEN_FLAGS, JobPaths, build_bisync, build_check, r
 from odnas.tokens import (BrokerTokenStrategy, TmpfsConfigStrategy, TokenBroker, remote_name, render_rclone_config)
 from tests.conftest import CANARY_RT, seed_user
 
+pytestmark = pytest.mark.smoke
+
 UID = "0b6c3a52-6d43-4c55-9d2b-6a1c9e1f0a11"
 
 

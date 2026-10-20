@@ -20,8 +20,8 @@ SERVICE_USER = "@SLUG@"
 RUN = f"/run/{SLUG}/creds"
 MNT = f"/srv/{SLUG}/mnt"
 VERIFY = f"/srv/{SLUG}/verify"
-UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-UNC_RE = re.compile(r"^//[A-Za-z0-9.-]{1,253}/[A-Za-z0-9][A-Za-z0-9 _.-]{0,79}$")
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
+UNC_RE = re.compile(r"^//[A-Za-z0-9.-]{1,253}/[A-Za-z0-9][A-Za-z0-9 _.-]{0,79}\Z")
 OK, USAGE, OTHER, UNREACHABLE, AUTH = 0, 2, 3, 4, 13
 
 

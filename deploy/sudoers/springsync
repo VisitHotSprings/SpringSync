@@ -1,0 +1,5 @@
+# /etc/sudoers.d/@SLUG@ (0440 root). Validated with `visudo -cf` before install.
+# The service user may run exactly one root command. The helper itself accepts
+# only `mount|umount|verify <uuid>` and rejects everything else.
+Defaults:@SLUG@ !requiretty, env_reset
+@SLUG@ ALL=(root) NOPASSWD: /usr/local/lib/@SLUG@/mount-helper

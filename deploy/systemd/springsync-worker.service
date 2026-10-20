@@ -1,0 +1,39 @@
+[Unit]
+Description=@PRODUCT@ worker (scheduler, rclone runner, token broker on 127.0.0.1:8081)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+OnFailure=@SLUG@-alert@%n.service
+
+[Service]
+Type=simple
+User=@SLUG@
+Group=@SLUG@
+Environment=ODNAS_CONFIG=/etc/@SLUG@/@SLUG@.toml
+ExecStart=/opt/@SLUG@/current/venv/bin/odnas worker
+LoadCredentialEncrypted=data.key:/etc/@SLUG@/creds/data.key.cred
+LoadCredentialEncrypted=entra-app.key:/etc/@SLUG@/creds/entra-app.key.cred
+RuntimeDirectory=@SLUG@
+RuntimeDirectoryMode=0700
+Restart=on-failure
+RestartSec=5s
+KillMode=mixed
+TimeoutStopSec=120
+# rclone run logs: 0640, group adm via setgid log dir (readable by Walter in group adm)
+UMask=0027
+# The worker needs `sudo mount-helper`, so NoNewPrivileges and an empty capability
+# bounding set are NOT possible here (SPEC §7.4 exception). CIFS mounts are made inside
+# this unit's mount namespace and are not visible to other processes.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ReadWritePaths=/var/lib/@SLUG@ /var/log/@SLUG@ /srv/@SLUG@ /run/@SLUG@
+
+[Install]
+WantedBy=multi-user.target

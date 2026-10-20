@@ -1,0 +1,24 @@
+# Template for when the private GitHub repo exists (org not created yet: OPEN).
+# Not active anywhere; committed so the pipeline is reviewed with the code.
+name: ci
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: gitleaks (no secrets in the repo, SPEC §7.1)
+        uses: gitleaks/gitleaks-action@v2
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install --require-hashes --no-deps -r requirements.lock
+      - name: pinned rclone for integration tests
+        run: |
+          curl -fsSLo r.zip https://downloads.rclone.org/v1.75.2/rclone-v1.75.2-linux-amd64.zip
+          echo "349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702  r.zip" | sha256sum -c -
+          unzip -q r.zip && echo "ODNAS_TEST_RCLONE=$PWD/rclone-v1.75.2-linux-amd64/rclone" >> "$GITHUB_ENV"
+      - run: python -m pytest -q

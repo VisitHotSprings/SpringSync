@@ -1,0 +1,25 @@
+# Rendered by install.sh to /etc/caddy/Caddyfile (SPEC §8.1, research §9).
+# TLS via DNS-01 with CNAME delegation: the public zone holds only
+#   _acme-challenge.@SYNC_HOST@.  CNAME  sync.<ACME_ZONE>.
+# and Caddy writes the TXT record in a separate ACME-only zone/GCP project.
+# GCP_ACME_PROJECT and ACME_ZONE come from /etc/caddy/caddy.env.
+# Lab test T-C1 must pass first; for the first issue uncomment the staging CA line.
+{
+	email @ACME_EMAIL@
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+@SYNC_HOST@ {
+	tls {
+		dns googleclouddns {
+			gcp_project {$GCP_ACME_PROJECT}
+			gcp_application_default /etc/caddy/gcp-acme-sa.json
+		}
+		dns_challenge_override_domain sync.{$ACME_ZONE}
+		resolvers 8.8.8.8 1.1.1.1
+	}
+	encode zstd gzip
+	header Strict-Transport-Security "max-age=31536000"
+	header -Server
+	reverse_proxy 127.0.0.1:8080
+}

@@ -143,3 +143,15 @@ def seed_user(db, kr, *, state=D.ACTIVE, upn="jsmith@hotsprings.org", oid=None, 
     if defaults:
         db.update_profile(uid, **defaults)
     return uid
+
+
+def pytest_addoption(parser):
+    parser.addoption("--smoke", action="store_true", help="run only tests marked smoke")
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--smoke"):
+        keep = [i for i in items if i.get_closest_marker("smoke")]
+        deselected = [i for i in items if not i.get_closest_marker("smoke")]
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = keep

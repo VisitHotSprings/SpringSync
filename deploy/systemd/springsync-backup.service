@@ -1,0 +1,11 @@
+[Unit]
+Description=@PRODUCT@ daily DB + config backup (keys excluded)
+OnFailure=@SLUG@-alert@%n.service
+
+[Service]
+Type=oneshot
+# root: needs to read /etc/@SLUG@ and /etc/caddy (keys and SA JSON are skipped)
+Environment=ODNAS_CONFIG=/etc/@SLUG@/@SLUG@.toml
+LoadCredentialEncrypted=data.key:/etc/@SLUG@/creds/data.key.cred
+ExecStart=/opt/@SLUG@/current/venv/bin/odnas backup
+UMask=0077

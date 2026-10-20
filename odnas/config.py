@@ -14,8 +14,8 @@ import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
-SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
-GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}\Z")
+GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
 DELEGATED_SCOPES = ("Files.ReadWrite", "User.Read")  # MSAL adds openid/profile/offline_access
 RCLONE_ACCESS_SCOPES = "Files.ReadWrite offline_access"
 

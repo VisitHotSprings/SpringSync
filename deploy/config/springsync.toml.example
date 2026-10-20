@@ -1,0 +1,25 @@
+# /etc/springsync/springsync.toml : bootstrap only, NO SECRETS (SPEC §8.2).
+# Everything operational (NAS address, schedule, alerts, pilot list, group IDs)
+# is edited in the admin GUI and stored in the DB.
+
+[app]
+product_name = "SpringSync"          # working name; final name is an open decision
+slug = "springsync"                  # paths, unit names, check/archive file names
+org_name = "VisitHotSprings"         # User-Agent NONISV|<org>|<product>/<ver>
+base_url = "https://sync.hotsprings.org"
+
+[entra]
+tenant_id = "00000000-0000-0000-0000-000000000000"   # VHS tenant GUID (single-tenant)
+client_id = "00000000-0000-0000-0000-000000000000"   # app registration (client) ID
+credential_type = "certificate"                     # or "secret" (fallback, max 24 months)
+cert_path = "/etc/springsync/keys/entra-app.crt"    # public cert; private key via systemd credential
+token_mode = "broker"                               # "tmpfs_config" = fallback if lab test T-A3 fails (needs secret)
+allowed_upn_domain = "hotsprings.org"
+# bootstrap group object IDs (GUI can change them later)
+group_users = ""
+group_admins = ""
+group_auditors = ""
+
+[nas]
+nas_host = "unas.hotsprings.local"
+nas_share = "Personal-Drive"

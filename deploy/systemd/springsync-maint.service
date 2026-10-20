@@ -1,0 +1,14 @@
+[Unit]
+Description=@PRODUCT@ nightly maintenance (audit chain, log prune, tmp sweep, expiry checks)
+OnFailure=@SLUG@-alert@%n.service
+
+[Service]
+Type=oneshot
+User=@SLUG@
+Group=@SLUG@
+Environment=ODNAS_CONFIG=/etc/@SLUG@/@SLUG@.toml
+LoadCredentialEncrypted=data.key:/etc/@SLUG@/creds/data.key.cred
+ExecStart=/opt/@SLUG@/current/venv/bin/odnas maint
+ProtectSystem=strict
+ReadWritePaths=/var/lib/@SLUG@ /var/log/@SLUG@ /run/@SLUG@
+NoNewPrivileges=yes
