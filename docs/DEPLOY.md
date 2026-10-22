@@ -3,13 +3,14 @@
 This page is the Ubuntu host. For the Windows 11 Pro host (v0.10, SPEC §11.5) see
 [INSTALL-WINDOWS.md](INSTALL-WINDOWS.md); its scripts are in `deploy/windows/`.
 
-## Read-only deploy-key pull
-- The code lives in a private GitHub repo. The org/account doesn't exist yet (OPEN).
-- On the repo, add a **deploy key** with *Allow write access* **unchecked**. Its private half is
-  `/etc/<slug>/deploy/id_ed25519` (0400 root) on the server and nowhere else.
-- The server **pulls**. `install.sh` and `update.sh` run `git clone --depth 1 --branch vX.Y.Z` with
-  `GIT_SSH_COMMAND="ssh -i /etc/<slug>/deploy/id_ed25519 -o IdentitiesOnly=yes"`. No CI job or person
-  pushes to the server, and the server holds no credential that can write to GitHub.
+## Pull model
+- The code is in the **public** repo https://github.com/VisitHotSprings/SpringSync (public since
+  2026-10-22). Never commit real hostnames, IPs, share names or staff emails; they go in the server's
+  local config only.
+- The server **pulls** over HTTPS: `install.sh` and `update.sh` run `git clone --depth 1 --branch vX.Y.Z`.
+  No CI job or person pushes to the server, and the server holds no credential that can write to GitHub.
+- If the repo ever goes private again, set `REPO_URL=git@github.com:...` and put a read-only deploy key at
+  `/etc/<slug>/deploy/id_ed25519` (0400 root); both scripts then use it.
 - Only `vX.Y.Z` tags are accepted; branch names are refused. Tag-signature verification can be switched on
   (`REQUIRE_SIGNED_TAGS=1`) once a signing key exists.
 - Dependencies are installed with `pip --require-hashes` from `requirements.lock`.

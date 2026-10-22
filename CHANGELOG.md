@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.2 (2026-10-22)
+- **Ubuntu install works from the public repo.** `install.sh` now defaults `REPO_URL` to
+  `https://github.com/VisitHotSprings/SpringSync.git` and needs no deploy key for an HTTPS URL. An SSH URL
+  still requires the read-only deploy key. `update.sh` uses the deploy key only if it exists.
+- No app code change.
+
 ## 0.10.1 (unreleased, lab build, 2026-10-22). Windows CI fixes
 The first run of the `windows` CI job on a real Windows runner found 7 test failures. Two of them were real
 Windows bugs; the rest were tests that assumed Linux. Nothing live; no schema change.

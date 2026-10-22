@@ -145,9 +145,13 @@ say "6. app ${VERSION:-<no --version given>}"
 if [[ -n "$VERSION" ]]; then
   REL="$OPT/releases/$VERSION"
   if [[ ! -x "$REL/venv/bin/odnas" ]]; then
-    : "${REPO_URL:?set REPO_URL=git@github.com:<OWNER>/<REPO>.git}"
-    [[ -f "$ETC/deploy/id_ed25519" ]] || { echo "place the read-only deploy key at $ETC/deploy/id_ed25519 (0400 root)" >&2; exit 1; }
-    export GIT_SSH_COMMAND="ssh -i $ETC/deploy/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+    # The repo is public (Oct 2026), so the default HTTPS URL needs no key. An SSH URL (git@...) still
+    # requires the read-only deploy key, for a future private fork.
+    REPO_URL="${REPO_URL:-https://github.com/VisitHotSprings/SpringSync.git}"
+    if [[ "$REPO_URL" != https://* ]]; then
+      [[ -f "$ETC/deploy/id_ed25519" ]] || { echo "place the read-only deploy key at $ETC/deploy/id_ed25519 (0400 root)" >&2; exit 1; }
+      export GIT_SSH_COMMAND="ssh -i $ETC/deploy/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+    fi
     run git clone --quiet --depth 1 --branch "$VERSION" "$REPO_URL" "$REL"
     run python3.12 -m venv "$REL/venv"
     run "$REL/venv/bin/pip" install --quiet --require-hashes --no-deps -r "$REL/requirements.lock"

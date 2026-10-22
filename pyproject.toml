@@ -1,6 +1,6 @@
 [project]
 name = "odnas"
-version = "0.9.1"
+version = "0.10.2"
 description = "Per-user two-way OneDrive <-> UniFi NAS home-folder sync (working name SpringSync)"
 requires-python = ">=3.12"
 

@@ -3,8 +3,8 @@
 #
 #   sudo /opt/springsync/current/deploy/update.sh v0.1.1 [--slug springsync]
 #
-# Pull model: the server fetches from GitHub with a READ-ONLY deploy key
-# (/etc/<slug>/deploy/id_ed25519, 0400 root). Nothing ever pushes to the server.
+# Pull model: the server fetches the public repo over HTTPS (or, for an SSH remote, with a
+# READ-ONLY deploy key at /etc/<slug>/deploy/id_ed25519, 0400 root). Nothing ever pushes to the server.
 set -euo pipefail
 TAG="${1:-}"; shift || true
 SLUG="springsync"
@@ -14,7 +14,8 @@ while [[ $# -gt 0 ]]; do case "$1" in --slug) SLUG="$2"; shift ;; *) echo "unkno
 
 OPT="/opt/$SLUG"; ETC="/etc/$SLUG"; LIB="/var/lib/$SLUG"
 CUR="$(readlink -f "$OPT/current")"; REL="$OPT/releases/$TAG"
-export GIT_SSH_COMMAND="ssh -i $ETC/deploy/id_ed25519 -o IdentitiesOnly=yes"
+# Public repo over HTTPS needs no key; the deploy key is used only if present (SSH remotes).
+[[ -f "$ETC/deploy/id_ed25519" ]] && export GIT_SSH_COMMAND="ssh -i $ETC/deploy/id_ed25519 -o IdentitiesOnly=yes"
 export ODNAS_CONFIG="$ETC/$SLUG.toml"
 say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 audit() { sudo -u "$SLUG" env ODNAS_CONFIG="$ODNAS_CONFIG" CREDENTIALS_DIRECTORY="$ETC/keys" \
