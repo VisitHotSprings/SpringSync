@@ -310,37 +310,58 @@ them as written:
 
 ## J. v0.12 Sign in with Microsoft / Google (Dex, 2026-10-22)
 Built to SPEC v0.10.1 §4.5 (Mark's order, 4:38 PM CT). For Reid to confirm or move into SPEC:
-1. **Redirect path:** `/auth/google/signin/callback` (config `[google] signin_redirect_path`), on the existing
-   Internal client. Mark adds `https://sync.hotsprings.org/auth/google/signin/callback` in the Google console.
-2. **Switch name:** `[signin] google = true` as in §4.5.9 (with `microsoft_work`, always true, and
+
+**Status (v0.12.1, SPEC v0.10.2):** Reid confirmed every item below. Two exceptions: the N-day rule (item 5)
+stays **pending Mark as §14.41**, and admin invites / Google-only users (item 10) are **deferred** past the
+pilot. Reid's two additions are built in v0.12.1: a Restore that could overwrite a file (item 4), and the NAS
+login and connecting a cloud drive (item 12), now need a Microsoft session. (Reid's confirmation numbered the
+items differently from this list; the mapping here is by content.)
+1. **[Confirmed, v0.10.2]** **Redirect path:** `/auth/google/signin/callback` (config `[google] signin_redirect_path`), on the existing
+   Internal client. Mark adds `https://sync.hotsprings.org/auth/google/signin/callback` in the Google console
+   before the pilot (a Google Cloud change: needs Mark's OK; docs/DEPLOY.md "Enable Google sign-in" step 1).
+   `sync.hotsprings.org` is the planned default host name; Mark confirms it before the DNS record is made.
+2. **[Confirmed, v0.10.2]** **Switch name:** `[signin] google = true` as in §4.5.9 (with `microsoft_work`, always true, and
    `personal_microsoft`, which must be false). The code default is **false** and the example file ships
    `google = false`; the DEPLOY step sets it to true for the pilot. No Gmail setting.
-3. **Turning it back on after the GUI kill switch:** §4.5.9 says "needs the local config". Built as a server
+3. **[Confirmed, v0.10.2]** **Turning it back on after the GUI kill switch:** §4.5.9 says "needs the local config". Built as a server
    CLI command (`springsync signin enable-google`, audited) that clears the kill flag; it refuses if the
    config says `google = false`. A config edit alone doesn't clear the flag, so a kill isn't undone by an
    unrelated restart.
-4. **Step-up list (§4.5.6):** Offboard, Accept deletes, Mirror baseline, set direction, set provider, Service
-   mode on (per user and global), every Settings save (covers pilot list, NAS option/share, providers), admin
-   unlink, and the kill switch. Pause/Resume, Approve initial sync, Retry and Restore stay allowed on a fresh
-   Google admin session. Role changes have no GUI (they come from Entra). Confirm.
-5. **N-day rule (§14.38–41, pending Mark):** setting `google_signin_ms_max_age_days` (1–90, default 7). Past it,
+4. **[Confirmed, v0.10.2; Restore rule added in v0.12.1]** **Step-up list (§4.5.6):** Offboard, Accept
+   deletes, Mirror baseline, set direction, set provider, Service mode on (per user and global), every Settings
+   save (covers pilot list, NAS option/share, providers), admin unlink, and the kill switch. Pause/Resume,
+   Approve initial sync and Retry stay allowed on a fresh Google admin session. Role changes have no GUI (they
+   come from Entra).
+   **Restore (v0.12.1):** allowed on a Google session only when the safety delta list exists and records
+   **only deletions** (the Restore then only puts missing files back). It needs a Microsoft session when the
+   list has any new, changed, newer, older, renamed or size-changed file (rclone's per-file events; SpringSync
+   counts them as `new` / `changed`), when there's no list or it can't be read or is empty, and for an
+   **onboarding** Restore (it is the first-sync approval). The refusal says "This Restore would overwrite
+   newer files; it needs a Microsoft sign-in." with the step-up button, and is audited as `stepup_required`
+   with the reason (`would_overwrite:<events>`, `no_delta_list`, `delta_list_empty`, `onboarding_restore`).
+5. **[Pending Mark, §14.41]** **N-day rule (§14.38–41):** setting `google_signin_ms_max_age_days` (1–90, default 7). Past it,
    a Google session has **no access** (it asks for a Microsoft sign-in); it doesn't end the session.
-6. **Google session length 4 h** (Microsoft 8 h), because Google sign-in bypasses Entra Conditional Access
+6. **[Confirmed, v0.10.2]** **Google session length 4 h** (Microsoft 8 h), because Google sign-in bypasses Entra Conditional Access
    (§4.5.8 item 3). Not stated for Workspace accounts in SPEC; Dex's choice.
-7. **Skew:** 60 s as SPEC. Max token age 10 min after `iat` for both providers.
-8. **Last method removed by an admin** = the user goes to `offboarding` (credentials erased by the existing
+7. **[Confirmed, v0.10.2]** **Skew:** 60 s as SPEC. Max token age 10 min after `iat` for both providers.
+8. **[Confirmed, v0.10.2]** **Last method removed by an admin** = the user goes to `offboarding` (credentials erased by the existing
    offboarding job; files untouched), with the UPN typed to confirm. Users can't remove their last method.
-9. **Unlinking a Microsoft identity** renames `users.entra_oid` to `unlinked:<oid>:<time>` so the old account
+9. **[Confirmed, v0.10.2]** **Unlinking a Microsoft identity** renames `users.entra_oid` to `unlinked:<oid>:<time>` so the old account
    can't re-attach by the legacy column; a later Microsoft sign-in with it is refused ("removed from
    SpringSync. Ask IT.") instead of creating a second user. Re-linking it is through Link Microsoft from a
    Google session (or an admin restore later).
-10. **Not built in v0.12.0:** admin invites / one-time links and **Google-only users** created by an admin with
+10. **[Deferred past the pilot, v0.10.2]** **Not built in v0.12.0:** admin invites / one-time links and **Google-only users** created by an admin with
    a chosen NAS share (§4.5.5 b, §4.5.6). Until then every user starts with a Microsoft sign-in. No `invites`
    table yet.
-11. **Microsoft sign-in still also connects OneDrive** (same scopes as before); only Link Microsoft discards
+11. **[Confirmed, v0.10.2]** **Microsoft sign-in still also connects OneDrive** (same scopes as before); only Link Microsoft discards
    its refresh token. Splitting sign-in from connect is not in this release.
-12. **Google sessions** may change the NAS login and connect Google Drive like Microsoft sessions. Say if
-   those should need a Microsoft session too.
-13. `auth_time`: Google sends it only if enabled for the project; checked when present, otherwise the
+12. **[Confirmed, v0.10.2; built in v0.12.1]** **NAS login and cloud drives need a Microsoft session.**
+   On a Google session, `POST /me/nas` (changing the NAS login), `/me/google/connect` (connect or reconnect
+   Google Drive, and its callback) and the admin set-provider action are refused with the step-up message.
+   The /me page shows "Sign in with Microsoft…" links instead of the NAS form and the Connect button, and the
+   OneDrive **Reconnect** link points to `/login?stepup=1`. There is no separate "disconnect drive" action:
+   disconnecting is Offboard or a provider change, both already step-up actions. The admin **Test NAS login**
+   stays allowed (it stores nothing).
+13. **[Confirmed, v0.10.2]** `auth_time`: Google sends it only if enabled for the project; checked when present, otherwise the
    10-minute, session-bound link request is the control (T-I1 records which).
 

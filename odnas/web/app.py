@@ -56,6 +56,9 @@ STEPUP_LOGIN_AFTER = timedelta(hours=1)   # step-up uses prompt=login if the las
 AUTH_MS, AUTH_GOOGLE = "microsoft", "google"
 SIGNIN_GOOGLE_OFF = "signin_google_off"   # worker_state flag: the GUI kill switch (only the CLI clears it)
 STEPUP_MSG = "This action needs a Microsoft sign-in. Sign in with Microsoft to continue."
+# v0.12.1 (SPEC v0.10.2 §4.5.6): a Restore that could overwrite an existing file needs a Microsoft session
+STEPUP_RESTORE_MSG = "This Restore would overwrite newer files; it needs a Microsoft sign-in."
+STEPUP_MSGS = (STEPUP_MSG, STEPUP_RESTORE_MSG)
 # SPEC §4.5.6 step-up: these admin user actions always need a Microsoft session
 STEPUP_ACTIONS = {"safety-accept-deletes", "approve-mirror-baseline", "set-direction", "set-provider",
                   "service-mode-on", "offboard"}
@@ -244,11 +247,19 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
             return sess
         return dep
 
-    def need_microsoft(sess: dict) -> None:
-        """SPEC §4.5.6 step-up: destructive admin actions always need a Microsoft session."""
+    def need_microsoft(sess: dict, action: str = "", reason: str = "", target: str | None = None,
+                       msg: str = STEPUP_MSG) -> None:
+        """SPEC §4.5.6 step-up: destructive actions always need a Microsoft session. v0.12.1 also: the NAS
+        login, connecting/disconnecting a cloud drive, and a Restore that could overwrite a file."""
         if sess.get("auth") == AUTH_GOOGLE:
-            db.audit(sess["oid"], "stepup_required", sess.get("user_id") or "", {"provider": "google"})
-            raise HTTPException(403, STEPUP_MSG)
+            det = {"provider": "google"}
+            if action:
+                det["action"] = action
+            if reason:
+                det["reason"] = reason
+            db.audit(sess["oid"], "stepup_required", target if target is not None else (sess.get("user_id") or ""),
+                     det)
+            raise HTTPException(403, msg)
 
     def render(request: Request, name: str, sess: dict | None = None, **ctx: Any) -> HTMLResponse:
         ctx.update(request=request, sess=sess, roles=(sess or {}).get("_roles", set()),
@@ -262,7 +273,7 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
             return RedirectResponse("/", 303)
         return templates.TemplateResponse(request, "error.html", {"request": request, "sess": None, "roles": set(),
                                           "csrf": "", "code": exc.status_code, "message": exc.detail,
-                                          "stepup": exc.detail == STEPUP_MSG},
+                                          "stepup": exc.detail in STEPUP_MSGS},
                                           status_code=exc.status_code)
 
     # ---- public -----------------------------------------------------------
@@ -634,6 +645,7 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
     @app.post("/me/google/connect")
     async def google_connect(request: Request, sess: dict = Depends(require(ROLE_USER))):
         await check_csrf(request, sess)
+        need_microsoft(sess, "google_connect", "connect_or_reconnect_drive")   # v0.12.1 §4.5.6
         u = db.user_full(sess["user_id"])
         if not _google_ready(u):
             raise HTTPException(409, "Google Drive is not your connected cloud drive (ask IT).")
@@ -659,6 +671,8 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         sess = get_session(request)
         if not sess or ROLE_USER not in roles_for(sess):
             raise HTTPException(401, "Sign in with Microsoft first, then connect Google Drive.")
+        if sess.get("auth") == AUTH_GOOGLE:   # v0.12.1: the connect must also FINISH in a Microsoft session
+            need_microsoft(sess, "google_connect", "callback_on_google_session")
         q = dict(request.query_params)
         state = q.get("state", "")
         if not state or not secrets.compare_digest(request.cookies.get(flow_cookie, ""), state):
@@ -745,6 +759,7 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
     async def me_nas(request: Request, sess: dict = Depends(user_dep)):
         form = await check_csrf(request, sess)
         uid = sess["user_id"]
+        need_microsoft(sess, "nas_login_change", "changes_a_stored_credential")   # v0.12.1 §4.5.6
         if settings().nas_option != "A":
             raise HTTPException(400, "NAS logins are not used in the current NAS option.")
         if db.rate_limited(f"nasverify:{uid}"):
@@ -929,7 +944,8 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         return render(request, "user_detail.html", sess, u=u, runs=db.runs(uid, 30), issues=db.open_issues(uid),
                       nas=db.nas_credential_meta(uid), ms=db.cloud_credential(uid), admin=True,
                       safety=_safety_view(u, with_delta=True), cv=cloud.view(u, settings()),
-                      providers=settings().providers(), methods=_methods(uid), **_sm_user(u))
+                      providers=settings().providers(), methods=_methods(uid),
+                      restore_stepup=bool(u["safety_abort_at"]) and bool(restore_overwrite_reason(u)), **_sm_user(u))
 
     @adm.post("/users/{uid}/identities/{iid}/unlink")
     async def admin_unlink(uid: str, iid: int, request: Request, sess: dict = Depends(admin_dep)):
@@ -1030,6 +1046,41 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
     def _delta_doc(uid: str) -> dict | None:
         f = delta_file(cfg, uid)
         return json.loads(f.read_text()) if f.exists() else None
+
+    def restore_overwrite_reason(u) -> str:
+        """SPEC v0.10.2 §4.5.6 (v0.12.1): '' when a Restore can only put missing files back, i.e. a safety delta
+        list exists and records nothing but deletions. Otherwise why it could overwrite an existing file
+        (a Microsoft session is then required): an onboarding Restore (the first-sync approval), no delta list,
+        an unreadable or empty one, or any new/changed/newer/older/renamed/size-changed entry. parse_deltas
+        folds every non-delete, non-new event into 'changed'; 'new' is treated as not deletions-only too."""
+        if not u["onboarding_completed_at"]:
+            return "onboarding_restore"
+        if json.loads(u["safety_abort_json"] or "{}").get("during") == "dryrun" or not u["safety_delta_at"]:
+            return "no_delta_list"
+        try:
+            d = _delta_doc(u["id"])
+        except (OSError, ValueError):
+            d = None
+        counts = d.get("counts") if isinstance(d, dict) else None
+        if not isinstance(counts, dict):
+            return "no_delta_list"
+        other: dict[str, int] = {}
+        deleted = 0
+        try:
+            for side, c in counts.items():
+                for k, n in (c or {}).items():
+                    if k == "deleted":
+                        deleted += int(n)
+                    elif int(n):
+                        other[k] = other.get(k, 0) + int(n)
+            items_other = sorted({str(i.get("event")) for i in d.get("items", []) if i.get("event") != "deleted"})
+        except (AttributeError, TypeError, ValueError):
+            return "no_delta_list"
+        if other or items_other:
+            return "would_overwrite:" + ",".join(sorted(set(other) | set(items_other)))
+        if deleted <= 0:
+            return "delta_list_empty"
+        return ""
 
     def _safety_view(u, with_delta: bool) -> dict | None:
         """Counts and decision state only (no file names) for admins and auditors alike. The file list
@@ -1174,6 +1225,9 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
             now = D.iso(D.utcnow())
             details.update(abort=json.loads(u["safety_abort_json"] or "{}"), delta=u["safety_delta_summary"])
             if action == "safety-restore":
+                why = restore_overwrite_reason(u)
+                if why:   # v0.12.1 §4.5.6: only a deletions-only Restore is allowed on a Google session
+                    need_microsoft(sess, "safety-restore", why, target=uid, msg=STEPUP_RESTORE_MSG)
                 when = str(form.get("when") or D.RESTORE_NEXT_SLOT)
                 if when not in (D.RESTORE_NEXT_SLOT, D.RESTORE_TONIGHT):
                     raise HTTPException(400, "Choose 'next slot' or 'tonight'.")

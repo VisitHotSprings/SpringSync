@@ -132,7 +132,15 @@ credential). No new Google project, no new secret.
 **From a v0.10.3 server that already has the Google client ID and secret** (config
 `/etc/springsync/springsync.toml` with `[google] client_id` and `allowed_domain`). Needs Mark's OK.
 
-1. **Google Cloud console** (Mark's Google admin sign-in): APIs & Services → Credentials → the existing
+**Before the pilot (required, needs Mark's OK):** the redirect URI below must be added to the Internal OAuth
+client in Google Cloud project `springsync`. Without it, Google sign-in fails with `redirect_uri_mismatch`.
+
+**Actions that always need a Microsoft sign-in** (v0.12.1): Offboard, Accept deletes, Mirror baseline,
+direction and provider changes, every Settings save, Service mode on, unlinking, the Google kill switch,
+changing the NAS login, connecting or reconnecting Google Drive or OneDrive, and any Restore that would
+overwrite a file (a Restore that only puts back deleted files is allowed on a Google session).
+
+1. **Google Cloud console**, only with Mark's OK (Mark's Google admin sign-in): APIs & Services → Credentials → the existing
    SpringSync **Web application** client → *Authorized redirect URIs* → **add** (keep the existing
    `/auth/google/callback` one):
    ```
@@ -140,17 +148,17 @@ credential). No new Google project, no new secret.
    ```
    Save. Google says changes can take a few minutes to apply. No new scopes are needed on the consent screen
    (`openid`, `email` and `profile` are basic scopes).
-2. **Update to v0.12.0** (as root on the server). `update.sh` drains, backs up the DB (`pre-v0.12.0`), runs
+2. **Update to v0.12.1** (as root on the server). `update.sh` drains, backs up the DB (`pre-v0.12.1`), runs
    the smoke tests, migrates the DB (schema 9: the `identities` table; existing users get their Microsoft
    identity row), restarts and health-checks, and rolls back on failure:
    ```
-   sudo /opt/springsync/current/deploy/update.sh v0.12.0
+   sudo /opt/springsync/current/deploy/update.sh v0.12.1
    ```
    Then re-run the installer once, because a server installed before v0.11.0 doesn't have the v0.11
    auto-update timer and the update-lock tmpfiles entry (`update.sh` doesn't install systemd units). It's
    idempotent and keeps keys, the DB and the config; auto-update stays **off** unless you turn it on:
    ```
-   cd /opt/springsync/current/deploy && sudo ./install.sh --version v0.12.0
+   cd /opt/springsync/current/deploy && sudo ./install.sh --version v0.12.1
    ```
 3. **Check that the web service can read the Google secret** (the token exchange for sign-in runs in the web
    service, so the Google drop-in from "Google Cloud project and OAuth client" step 7 must exist for

@@ -13,19 +13,21 @@
 <tr><th>Next run</th><td>{{ u.next_run_at|local }}</td></tr>
 <tr><th>Files that can't sync</th><td>{{ u.unsyncable_count }}</td></tr>
 <tr><th>{{ cv.cloud_side }}</th><td>{% if ms %}connected {{ ms.token_obtained_at|local }}{% if gcred %} as {{ gcred.google_email }}{% endif %}{% else %}not connected{% endif %}
- {% if cv.provider == 'gdrive' %}{% if google_ready %}<form class="inline" method="post" action="/me/google/connect"><input type="hidden" name="csrf" value="{{ csrf }}"><button>{{ 'Reconnect Google Drive' if ms else 'Connect Google Drive' }}</button></form>{% else %}&middot; Google Drive is not available yet (IT){% endif %}
- {% else %}&middot; <a href="/login">Reconnect</a>{% endif %}</td></tr>
+{% set google_sess = sess and sess.auth == 'google' %}
+ {% if cv.provider == 'gdrive' %}{% if google_ready %}{% if google_sess %}&middot; <a href="/login?stepup=1">Sign in with Microsoft to {{ 'reconnect' if ms else 'connect' }} Google Drive</a>{% else %}<form class="inline" method="post" action="/me/google/connect"><input type="hidden" name="csrf" value="{{ csrf }}"><button>{{ 'Reconnect Google Drive' if ms else 'Connect Google Drive' }}</button></form>{% endif %}{% else %}&middot; Google Drive is not available yet (IT){% endif %}
+ {% else %}&middot; <a href="{{ '/login?stepup=1' if google_sess else '/login' }}">Reconnect</a>{% endif %}</td></tr>
 </table>
 
 {% if nas_option == 'A' %}
 <h2>NAS login</h2>
 <p>{% if nas %}Saved and verified {{ nas.verified_at|local }}{% if nas.last_failure_at %}; <strong>last failed {{ nas.last_failure_at|local }}</strong>{% endif %}.{% else %}Not entered yet.{% endif %}
 Your password is stored encrypted and nobody, including IT, can view it.</p>
-<form method="post" action="/me/nas" autocomplete="off">
+{% if sess and sess.auth == 'google' %}<p>Changing your NAS login needs a Microsoft sign-in. <a href="/login?stepup=1">Sign in with Microsoft</a></p>
+{% else %}<form method="post" action="/me/nas" autocomplete="off">
 <input type="hidden" name="csrf" value="{{ csrf }}">
 <label>NAS username <input type="text" name="username" required maxlength="128"></label>
 <label>NAS password <input type="password" name="password" required maxlength="256"></label>
-<button>{{ 'Replace NAS login' if nas else 'Save NAS login' }}</button></form>
+<button>{{ 'Replace NAS login' if nas else 'Save NAS login' }}</button></form>{% endif %}
 {% endif %}
 
 <h2>Setup progress</h2>

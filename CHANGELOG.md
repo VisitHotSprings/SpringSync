@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.12.1 (2026-10-22)
+- **More actions need a Microsoft sign-in** (SPEC v0.10.2 §4.5.6, Reid's §J confirmation). On a Google
+  session these are refused with a "Sign in with Microsoft" step-up, audited as `stepup_required`:
+  - changing the NAS login (`POST /me/nas`);
+  - connecting or reconnecting Google Drive (`/me/google/connect` and its callback; a connect started in a
+    Microsoft session can't be finished from a Google one); the OneDrive Reconnect link on `/me` goes to
+    `/login?stepup=1`;
+  - **Restore** when it could overwrite a file. Allowed on Google only when the safety delta list exists
+    and shows only deletions. A missing or empty list, any new or changed file, or an onboarding Restore
+    (the first-sync approval) needs Microsoft. Message: "This Restore would overwrite newer files; it
+    needs a Microsoft sign-in."
+- `me.html` and `user_detail.html` show "Sign in with Microsoft" links in place of those actions on a Google
+  session. Test NAS login stays allowed (it stores nothing).
+- DEPLOY.md "Enable Google sign-in": states that the `/auth/google/signin/callback` redirect URI must be
+  added before the pilot (needs Mark's OK), and lists every Microsoft-only action.
+- OPEN-QUESTIONS §J: items confirmed; the N-day rule stays pending Mark (§14.41); invites and Google-only
+  users are deferred.
+
 ## 0.12.0 (2026-10-22)
 - **New: "Sign in with Microsoft" and "Sign in with Google"** on the login page (SPEC v0.10.1 §4.5; Mark's
   order, Oct 22, 2026 4:38 PM CT). Google is **hotsprings.org Workspace accounts only**, identity only

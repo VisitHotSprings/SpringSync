@@ -43,6 +43,7 @@
 <p><strong>Restore</strong> runs one <code>--resync --resync-mode newer</code> (next slot: normal run-time limit, re-queued once for tonight if it runs out; tonight: until the window closes): files deleted on one side are copied back from the other.
 <strong>Accept deletes</strong> runs bisync once with <code>--force</code> (normal run-time limit) after a fresh dry run confirms the approved delete count; the approval expires after 24 h. Deletions stay recoverable from the {{ safety.cloud }} recycle bin, the archive folder and NAS snapshots.</p>{% endif %}
 {% if safety.has_list %}<p><a href="/admin/users/{{ u.id }}/safety-delta">View the file list</a> (IT admins only; each view is audited).</p>{% endif %}
+{% if not safety.one_way and restore_stepup and sess and sess.auth == 'google' %}<p><small>This Restore could overwrite existing files, so it needs a Microsoft sign-in. <a href="/login?stepup=1">Sign in with Microsoft</a></small></p>{% endif %}
 {% if not safety.action and ((safety.delta_at and not safety.delta_pending) or safety.no_delta) %}
 <form class="inline" method="post" action="/admin/users/{{ u.id }}/safety-restore"><input type="hidden" name="csrf" value="{{ csrf }}">
 {% if safety.one_way %}</form>
