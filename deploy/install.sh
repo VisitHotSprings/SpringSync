@@ -63,9 +63,12 @@ mkd() { # mkd <dir> <mode> <owner:group>
 # ---- 1. platform -----------------------------------------------------------
 say "1. platform check"
 [[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
-. /etc/os-release
-[[ "${VERSION_ID:-}" == "24.04" && "$(dpkg --print-architecture)" == "amd64" ]] \
-  || { echo "requires Ubuntu 24.04 amd64 (found ${PRETTY_NAME:-?} $(dpkg --print-architecture))" >&2; exit 1; }
+# Read os-release in a subshell: sourcing it here would overwrite our $VERSION (--version) with the
+# OS's VERSION string (bug found on the first real Ubuntu dry run, fixed in v0.10.3).
+OS_VERSION_ID="$(. /etc/os-release; echo "${VERSION_ID:-}")"
+OS_PRETTY="$(. /etc/os-release; echo "${PRETTY_NAME:-?}")"
+[[ "$OS_VERSION_ID" == "24.04" && "$(dpkg --print-architecture)" == "amd64" ]] \
+  || { echo "requires Ubuntu 24.04 amd64 (found $OS_PRETTY $(dpkg --print-architecture))" >&2; exit 1; }
 
 # ---- 2. apt -----------------------------------------------------------------
 say "2. packages"
@@ -161,7 +164,7 @@ if [[ -n "$VERSION" ]]; then
     fi
   fi
   [[ "$(readlink -f "$OPT/current" 2>/dev/null)" == "$REL" ]] || run ln -sfn "$REL" "$OPT/current"
-  SRC_DIR="$OPT/current"
+  (( DRY )) || SRC_DIR="$OPT/current"   # a dry run clones nothing, so keep reading from this checkout
 fi
 render "$SRC_DIR/deploy/mount-helper" "$HELPER" 0755 root:root
 [[ -e "/usr/local/bin/$SLUG" ]] || run ln -s "$OPT/current/venv/bin/odnas" "/usr/local/bin/$SLUG"

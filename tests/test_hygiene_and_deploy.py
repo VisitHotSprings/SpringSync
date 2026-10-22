@@ -115,7 +115,7 @@ def test_install_script_pins_and_syntax():
     assert 'GO_SHA256="65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40"' in t
     assert "REPLACE_WITH" not in t and "GO_SHA256 is not pinned" not in t   # v0.1 refusal removed
     assert 'sha256sum -c -' in t and "Go checksum mismatch: ABORT" in t
-    assert 'VERSION_ID:-}" == "24.04"' in t and "--require-hashes" in t and "visudo -cf" in t
+    assert '"$OS_VERSION_ID" == "24.04"' in t and "--require-hashes" in t and "visudo -cf" in t
     for s in ("install.sh", "update.sh", "rollback.sh"):
         assert subprocess.run(["bash", "-n", str(ROOT / "deploy" / s)]).returncode == 0
 
@@ -145,3 +145,15 @@ def test_install_plugin_pin_check_logic(tmp_path):
         fake.chmod(0o755)
         r = subprocess.run(["bash", "-c", head + "\n" + fn + f'\nplugin_pinned "{fake}"'])
         assert r.returncode == ok, (ver, h1)
+
+
+def test_install_sh_does_not_source_os_release_into_its_own_scope():
+    """v0.10.3: `. /etc/os-release` at top level overwrote --version with the OS VERSION string."""
+    import re
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "deploy" / "install.sh").read_text()
+    for line in src.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        assert not re.match(r"^(\.|source)\s+/etc/os-release", stripped), line

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.3 (2026-10-22)
+- **Fixed: `install.sh` lost the `--version` value on real Ubuntu.** It sourced `/etc/os-release`, whose
+  `VERSION` variable ("24.04.5 LTS (Noble Numbat)") overwrote ours, so step 6 tried to clone a tag by that
+  name. The OS file is now read in a subshell. Found on Mark's first Ubuntu dry run. Regression test added.
+- **Fixed: `--dry-run` stopped at step 7** reading `/opt/<slug>/current`, which a dry run never creates; it
+  now keeps reading from the checkout.
+
 ## 0.10.2 (2026-10-22)
 - **Ubuntu install works from the public repo.** `install.sh` now defaults `REPO_URL` to
   `https://github.com/VisitHotSprings/SpringSync.git` and needs no deploy key for an HTTPS URL. An SSH URL
