@@ -6,5 +6,6 @@ python-multipart
 msal
 cryptography
 httpx
+pyjwt          # v0.12: OIDC ID-token signature checks (odnas/oidc.py); RS256 via cryptography
 # smoke tests run by deploy/update.sh against the new venv
 pytest

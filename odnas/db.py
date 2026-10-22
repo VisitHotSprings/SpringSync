@@ -328,6 +328,31 @@ MIGRATIONS: list[str] = [
     UPDATE sync_profiles SET two_way_baseline_at = onboarding_completed_at WHERE onboarding_completed_at IS NOT NULL;
     UPDATE sync_runs SET direction = 'two_way', provider = 'onedrive';
     """,
+    # 9: v0.12 (SPEC v0.10.1 §4.5.5-§4.5.7): sign-in identities keyed by (provider, issuer, subject), never email,
+    #    each linked to exactly one user (one identity per provider per user); roles stored on the user and
+    #    refreshed at every Microsoft sign-in. Expand-only: users.entra_oid stays (one release); existing users
+    #    get their `entra` identity row from backfill_entra_identities() (needs the tenant ID from the config).
+    #    An unlinked identity is never stored (default deny); unlinking deletes the row (the audit log keeps it).
+    """
+    CREATE TABLE identities (
+        id INTEGER PRIMARY KEY,
+        provider TEXT NOT NULL CHECK (provider IN ('entra','google','msa')),
+        issuer TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        tid TEXT,
+        hd TEXT,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        linked_at TEXT NOT NULL,
+        linked_by TEXT NOT NULL,
+        display_email TEXT,
+        email_verified INTEGER NOT NULL DEFAULT 0,
+        last_seen_at TEXT,
+        UNIQUE (provider, issuer, subject),
+        UNIQUE (user_id, provider)
+    );
+    ALTER TABLE users ADD COLUMN roles TEXT NOT NULL DEFAULT '';
+    ALTER TABLE users ADD COLUMN roles_synced_at TEXT;
+    """,
 ]
 
 NAS_GLOBAL_PAUSE = "nas_global_pause"   # worker_state key (SPEC v0.6 §9.4, Option B only)
@@ -490,6 +515,75 @@ class DB:
 
     def google_credential(self, uid: str) -> sqlite3.Row | None:
         return self.one("SELECT * FROM google_credentials WHERE user_id=?", (uid,))
+
+    # ---- sign-in identities and stored roles (v0.12, SPEC v0.10.1 §4.5.5-§4.5.7) -------------------
+    def identity(self, provider: str, issuer: str, subject: str) -> sqlite3.Row | None:
+        return self.one("SELECT * FROM identities WHERE provider=? AND issuer=? AND subject=?", (provider, issuer, subject))
+
+    def identity_by_id(self, iid: int) -> sqlite3.Row | None:
+        return self.one("SELECT * FROM identities WHERE id=?", (iid,))
+
+    def identities_for_user(self, uid: str) -> list[sqlite3.Row]:
+        return self.all("SELECT * FROM identities WHERE user_id=? ORDER BY provider", (uid,))
+
+    def link_identity(self, provider: str, issuer: str, subject: str, uid: str, linked_by: str, *, tid: str = "",
+                      hd: str = "", email: str = "", email_verified: bool = False) -> int:
+        """Raises sqlite3.IntegrityError if the identity belongs to someone or the user has one for this provider."""
+        now = iso(utcnow())
+        return int(self.q("INSERT INTO identities(provider, issuer, subject, tid, hd, user_id, linked_at, linked_by, "
+                          "display_email, email_verified, last_seen_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                          (provider, issuer, subject, tid, hd, uid, now, linked_by, email, int(email_verified),
+                           now)).lastrowid)
+
+    def touch_identity(self, iid: int, email: str = "", email_verified: bool = False) -> None:
+        self.q("UPDATE identities SET last_seen_at=?, display_email=?, email_verified=? WHERE id=?",
+               (iso(utcnow()), email, int(email_verified), iid))
+
+    def unlink_identity(self, iid: int) -> sqlite3.Row | None:
+        r = self.identity_by_id(iid)
+        if r is not None:
+            self.q("DELETE FROM identities WHERE id=?", (iid,))
+            if r["provider"] == "entra":   # the legacy column must not re-link this oid at the next sign-in
+                self.q("UPDATE users SET entra_oid=? WHERE id=? AND entra_oid=?",
+                       (f"unlinked:{r['subject']}:{iso(utcnow())}", r["user_id"], r["subject"]))
+        return r
+
+    def backfill_entra_identities(self, tenant_id: str) -> int:
+        """Each users.entra_oid becomes an `entra` identity (SPEC §4.5.7 migration). Idempotent."""
+        if not tenant_id:
+            return 0
+        n = 0
+        for u in self.all("SELECT id, entra_oid, upn, created_at FROM users WHERE entra_oid NOT LIKE 'unlinked:%' AND id NOT IN "
+                          "(SELECT user_id FROM identities WHERE provider='entra')"):
+            try:
+                self.q("INSERT INTO identities(provider, issuer, subject, tid, user_id, linked_at, linked_by, "
+                       "display_email) VALUES ('entra',?,?,?,?,?,'migration',?)",
+                       (f"https://login.microsoftonline.com/{tenant_id}/v2.0", u["entra_oid"], tenant_id, u["id"],
+                        u["created_at"], u["upn"]))
+                n += 1
+            except sqlite3.IntegrityError:
+                continue
+        return n
+
+    def set_roles(self, uid: str, roles: set[str]) -> tuple[set[str], set[str]]:
+        """Store the roles from this Microsoft sign-in (including removals) and stamp roles_synced_at."""
+        old = self.user_roles(uid)
+        self.q("UPDATE users SET roles=?, roles_synced_at=? WHERE id=?", (",".join(sorted(roles)), iso(utcnow()), uid))
+        return old, set(roles)
+
+    def user_roles(self, uid: str) -> set[str]:
+        r = self.one("SELECT roles FROM users WHERE id=?", (uid,))
+        return {x for x in (r["roles"] if r else "").split(",") if x}
+
+    def end_sessions(self, *, identity_id: int | None = None, auth: str | None = None) -> int:
+        """Delete the live sessions of one identity, or every session of one sign-in type."""
+        if identity_id is not None:
+            return self.q("DELETE FROM sessions WHERE json_extract(data_json, '$.identity_id') = ?",
+                          (identity_id,)).rowcount
+        return self.q("DELETE FROM sessions WHERE json_extract(data_json, '$.auth') = ?", (auth,)).rowcount
+
+    def end_sessions_for_oid(self, oid: str) -> int:
+        return self.q("DELETE FROM sessions WHERE json_extract(data_json, '$.oid') = ?", (oid,)).rowcount
 
     def google_credential_by_sub(self, sub: str) -> sqlite3.Row | None:
         return self.one("SELECT * FROM google_credentials WHERE google_sub=?", (sub,))

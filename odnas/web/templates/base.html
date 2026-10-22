@@ -2,13 +2,14 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}{{ product }}{% endblock %}</title><link rel="stylesheet" href="/static/app.css"></head>
 <body><header><strong>{{ product }}</strong><nav>
-{% if 'user' in roles %}<a href="/me">My sync</a>{% endif %}
+{% if 'user' in roles %}<a href="/me">My sync</a><a href="/me/signin-methods">My sign-in methods</a>{% endif %}
 {% if 'admin' in roles %}<a href="/admin">Admin</a><a href="/admin/settings">Settings</a>{% endif %}
 {% if 'auditor' in roles or 'admin' in roles %}<a href="/audit">Auditor view</a><a href="/audit/log">Audit log</a>{% endif %}
 </nav>
 {% if sess %}<span>{{ sess.upn }}</span>
 <form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Sign out</button></form>{% endif %}
 </header>
+{% if signin_note == 'admin_needs_ms' %}<p class="msg">Sign in with Microsoft to use admin tools. <a href="/login?stepup=1">Sign in with Microsoft</a></p>{% endif %}
 {% block body %}{% endblock %}
 <footer><small>{{ product }} v{{ version }} &middot; times shown in America/Chicago</small></footer>
 </body></html>

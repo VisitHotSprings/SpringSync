@@ -1,7 +1,12 @@
-"""Web app (SPEC §4.1, §6, §7.6). Server-rendered, no inline script, strict CSP.
+"""Web app (SPEC §4.1, §4.5, §6, §7.6). Server-rendered, no inline script, strict CSP.
 
-Areas and roles (from Entra security-group claims, re-evaluated every request
-against the group IDs currently in settings):
+v0.12 (SPEC v0.10.1 §4.5): two sign-in buttons. A Microsoft session's roles come from the Entra group
+claims (re-evaluated every request against the group IDs in settings) and are also stored on the user
+(users.roles, roles_synced_at). A Google session (hotsprings.org Workspace accounts, a linked identity
+only) uses the stored roles: User while a Microsoft sign-in is newer than google_signin_ms_max_age_days,
+Admin/Auditor only within 24 h of it, and destructive admin actions always need a Microsoft session.
+
+Areas and roles:
   /me/*     users     (SpringSync-Users + pilot list)  - own status only
   /admin/*  admins    (SpringSync-Admins, Mark)        - settings + user actions
   /audit/*  auditors  (SpringSync-Auditors, Walter)    - GET only, read-only
@@ -24,10 +29,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from odnas import cloud, service_mode
-from odnas.google import ClaimsError, GoogleClient, check_claims
+from odnas.google import ClaimsError, GoogleClient, check_claims, check_signin_claims
 from odnas.notify import Alerter
 from odnas import __version__
 from odnas import autoupdate
+from odnas import oidc
 from odnas import db as D
 from odnas import settings_store
 from odnas.config import Config
@@ -43,6 +49,16 @@ from odnas.status import credential_expiry, disk_free_pct, worker_alive
 log = logging.getLogger("odnas.web")
 HERE = Path(__file__).resolve().parent
 SESSION_HOURS = 8
+GOOGLE_SESSION_HOURS = 4          # Google sessions bypass Entra Conditional Access (SPEC §4.5.8 item 3)
+ADMIN_FRESH = timedelta(hours=24)  # Admin/Auditor on a Google session only within 24 h of a Microsoft sign-in (§14.38)
+LINK_WINDOW_S = 600                # self-link must finish within 10 min of the click (§4.5.5 a)
+STEPUP_LOGIN_AFTER = timedelta(hours=1)   # step-up uses prompt=login if the last Microsoft sign-in is older
+AUTH_MS, AUTH_GOOGLE = "microsoft", "google"
+SIGNIN_GOOGLE_OFF = "signin_google_off"   # worker_state flag: the GUI kill switch (only the CLI clears it)
+STEPUP_MSG = "This action needs a Microsoft sign-in. Sign in with Microsoft to continue."
+# SPEC §4.5.6 step-up: these admin user actions always need a Microsoft session
+STEPUP_ACTIONS = {"safety-accept-deletes", "approve-mirror-baseline", "set-direction", "set-provider",
+                  "service-mode-on", "offboard"}
 ROLE_USER, ROLE_ADMIN, ROLE_AUDITOR = "user", "admin", "auditor"
 # Every POST /admin/users/{uid}/{action}. IT-admin role only (SpringSync-Admins); auditors get 403.
 ADMIN_USER_ACTIONS = ("pause", "resume", "approve-resync", "request-dryrun", "offboard",
@@ -115,6 +131,7 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
     cookie = f"{cfg.slug}_sid"
     flow_cookie = f"{cfg.slug}_flow"
     app.state.cfg, app.state.db = cfg, db
+    db.backfill_entra_identities(cfg.tenant_id)   # v0.12 §4.5.7: existing users get their `entra` identity row
 
     def settings():
         return settings_store.load(db, cfg)  # no keyring: secrets never decrypted in the web views
@@ -134,14 +151,15 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
     def _sid_key(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
 
-    def new_session(resp: Response, data: dict) -> None:
+    def new_session(resp: Response, data: dict, hours: int = SESSION_HOURS) -> None:
         token = secrets.token_urlsafe(32)
         now = datetime.now(timezone.utc)
         db.q("DELETE FROM sessions WHERE expires_at < ?", (D.iso(now),))
         db.q("INSERT INTO sessions(id, data_json, csrf, created_at, expires_at) VALUES (?,?,?,?,?)",
              (_sid_key(token), json.dumps(data), secrets.token_urlsafe(32), D.iso(now),
-              D.iso(now + timedelta(hours=SESSION_HOURS))))
-        resp.set_cookie(cookie, token, max_age=SESSION_HOURS * 3600, secure=cfg.cookie_secure, httponly=True,
+              D.iso(now + timedelta(hours=hours))))
+        lifetime_s = hours * 3600
+        resp.set_cookie(cookie, token, max_age=lifetime_s, secure=cfg.cookie_secure, httponly=True,
                         samesite="lax", path="/")
 
     def get_session(request: Request) -> dict | None:
@@ -155,9 +173,44 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         d["_csrf"], d["_sid"] = r["csrf"], r["id"]
         return d
 
+    def google_signin_on() -> bool:
+        """Local config [signin] google = true, the Google client configured, and the GUI kill switch not used."""
+        return cfg.google_signin_available and db.flag(SIGNIN_GOOGLE_OFF) is None
+
+    def google_roles(sess: dict) -> tuple[set[str], str]:
+        """SPEC §4.5.6: a Google session uses the roles stored on its linked user. -> (roles, note)."""
+        if not google_signin_on():
+            return set(), "google_off"
+        ident = db.identity_by_id(int(sess.get("identity_id") or 0))
+        uid = sess.get("user_id")
+        if not ident or ident["provider"] != "google" or ident["user_id"] != uid:
+            return set(), "unlinked"
+        u = db.user_full(uid)
+        if not u or u["state"] in (D.OFFBOARDING, D.REMOVED):
+            return set(), "inactive"
+        s = settings()
+        synced = D.parse_iso(u["roles_synced_at"])
+        now = D.utcnow()
+        if not synced or now - synced > timedelta(days=int(s.google_signin_ms_max_age_days)):
+            return set(), "ms_signin_required"
+        stored = db.user_roles(uid)
+        roles: set[str] = set()
+        if ROLE_USER in stored and (not s.pilot_only or u["upn"].lower() in s.pilot_set()):
+            roles.add(ROLE_USER)
+        note = ""
+        org = any(i["provider"] == "entra" for i in db.identities_for_user(uid))
+        for r in (ROLE_ADMIN, ROLE_AUDITOR):
+            if r in stored:
+                if org and now - synced <= ADMIN_FRESH:
+                    roles.add(r)
+                else:
+                    note = "admin_needs_ms"
+        return roles, note
+
     def roles_for(sess: dict) -> set[str]:
-        """Roles come ONLY from the Microsoft Entra sign-in (SPEC v0.9 §4.4: app sign-in stays Microsoft for
-        everyone; Google is a data connection, never a session)."""
+        """Microsoft session: from the Entra group claims. Google session: google_roles() (SPEC §4.5.6)."""
+        if sess.get("auth") == AUTH_GOOGLE:
+            return google_roles(sess)[0]
         s = settings()
         groups = set(sess.get("groups", []))
         roles = set()
@@ -182,14 +235,25 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
                 raise HTTPException(401, "sign in required")
             r = roles_for(sess)
             if not r & set(allowed):
+                if sess.get("auth") == AUTH_GOOGLE and google_roles(sess)[1] in ("admin_needs_ms", "ms_signin_required"):
+                    raise HTTPException(403, STEPUP_MSG)
                 raise HTTPException(403, "not allowed for your role")
             sess["_roles"] = r
+            if sess.get("auth") == AUTH_GOOGLE:
+                sess["_note"] = google_roles(sess)[1]
             return sess
         return dep
 
+    def need_microsoft(sess: dict) -> None:
+        """SPEC §4.5.6 step-up: destructive admin actions always need a Microsoft session."""
+        if sess.get("auth") == AUTH_GOOGLE:
+            db.audit(sess["oid"], "stepup_required", sess.get("user_id") or "", {"provider": "google"})
+            raise HTTPException(403, STEPUP_MSG)
+
     def render(request: Request, name: str, sess: dict | None = None, **ctx: Any) -> HTMLResponse:
         ctx.update(request=request, sess=sess, roles=(sess or {}).get("_roles", set()),
-                   csrf=(sess or {}).get("_csrf", ""))
+                   csrf=(sess or {}).get("_csrf", ""), signin_note=(sess or {}).get("_note", ""),
+                   google_signin=google_signin_on())
         return templates.TemplateResponse(request, name, ctx)
 
     @app.exception_handler(HTTPException)
@@ -197,19 +261,23 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         if exc.status_code == 401 and request.method == "GET":
             return RedirectResponse("/", 303)
         return templates.TemplateResponse(request, "error.html", {"request": request, "sess": None, "roles": set(),
-                                          "csrf": "", "code": exc.status_code, "message": exc.detail},
+                                          "csrf": "", "code": exc.status_code, "message": exc.detail,
+                                          "stepup": exc.detail == STEPUP_MSG},
                                           status_code=exc.status_code)
 
     # ---- public -----------------------------------------------------------
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
         sess = get_session(request)
+        note = ""
         if sess:
             r = roles_for(sess)
             target = "/me" if ROLE_USER in r else "/admin" if ROLE_ADMIN in r else "/audit" if ROLE_AUDITOR in r else None
             if target:
                 return RedirectResponse(target, 303)
-        return render(request, "index.html", sess)
+            if sess.get("auth") == AUTH_GOOGLE:
+                note = google_roles(sess)[1]
+        return render(request, "index.html", sess, note=note, msg=request.query_params.get("msg", ""))
 
     @app.get("/healthz")
     def healthz(request: Request):
@@ -224,58 +292,164 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         body = {"db": dbok, "worker_heartbeat": ts, "worker_alive": alive, "version": __version__}
         return JSONResponse(body, 200 if dbok else 503)
 
-    @app.get("/login")
-    def login(request: Request):
-        ip = request.client.host if request.client else "?"
-        if db.rate_limited(f"login:{ip}"):
-            raise HTTPException(429, "Too many sign-in attempts. Try again in 15 minutes.")
-        flow = entra.begin_auth(cfg.redirect_uri)
+    # ---- sign-in (v0.12: two buttons, SPEC v0.10.1 §4.5) ---------------------------------------------
+    def _store_flow(flow: dict) -> None:
         sealed = kr.seal(json.dumps(flow), Keyring.aad("auth_flows", flow["state"], "flow"))
         db.q("DELETE FROM auth_flows WHERE created_at < ?", (D.iso(D.utcnow() - timedelta(minutes=10)),))
         db.q("INSERT INTO auth_flows(state, flow_ct, key_id, created_at) VALUES (?,?,?,?)",
              (flow["state"], pack(sealed), sealed.key_id, D.iso(D.utcnow())))
+
+    def _redirect_to(flow: dict) -> RedirectResponse:
         resp = RedirectResponse(flow["auth_uri"], 303)
         resp.set_cookie(flow_cookie, flow["state"], max_age=600, secure=cfg.cookie_secure, httponly=True,
                         samesite="lax", path="/auth")
         return resp
 
-    @app.get(cfg.redirect_path)
-    def callback(request: Request):
-        q = dict(request.query_params)
-        state = q.get("state", "")
+    def _take_flow(request: Request, what: str = "Sign-in") -> dict:
+        """The single-use state record (10 min) bound to this browser's flow cookie. Deleted on first use, so a
+        replayed callback (and its nonce) can never be used twice."""
+        state = request.query_params.get("state", "")
         if not state or not secrets.compare_digest(request.cookies.get(flow_cookie, ""), state):
-            raise HTTPException(400, "Sign-in session mismatch. Please start again.")
+            raise HTTPException(400, f"{what} session mismatch. Please start again.")
         row = db.one("SELECT * FROM auth_flows WHERE state=? AND created_at > ?",
-                     (state, D.iso(D.utcnow() - timedelta(minutes=10))))
+                     (state, D.iso(D.utcnow() - timedelta(seconds=LINK_WINDOW_S))))
         db.q("DELETE FROM auth_flows WHERE state=?", (state,))
         if not row:
-            raise HTTPException(400, "Sign-in expired. Please start again.")
-        flow = json.loads(kr.open(unpack(row["flow_ct"], row["key_id"]), Keyring.aad("auth_flows", state, "flow")))
-        if flow.get("purpose") == "google_connect":
+            raise HTTPException(400, f"{what} expired. Please start again.")
+        return json.loads(kr.open(unpack(row["flow_ct"], row["key_id"]), Keyring.aad("auth_flows", state, "flow")))
+
+    def _sub_hash(sub: str) -> str:
+        return hashlib.sha256(sub.encode()).hexdigest()[:16]
+
+    def _refused(request: Request, provider: str, reason: str, issuer: str = "", sub: str = "", **extra) -> None:
+        """SPEC §4.5.2: a refused sign-in writes a rate-limited audit entry (issuer, subject hash, reason) only."""
+        ip = request.client.host if request.client else "?"
+        if not db.rate_limited(f"signin_refused_audit:{ip}", limit=20):
+            db.audit("anonymous", "signin_refused", "", {"provider": provider, "reason": reason, "issuer": issuer,
+                                                         "sub_hash": _sub_hash(sub) if sub else "", **extra})
+
+    def _last_ms_signin(sess: dict | None) -> datetime | None:
+        if not sess:
+            return None
+        if sess.get("auth") == AUTH_GOOGLE:
+            u = db.user_full(sess.get("user_id") or "")
+            return D.parse_iso(u["roles_synced_at"]) if u else None
+        return D.parse_iso(sess.get("ms_at"))
+
+    @app.get("/login")
+    def login(request: Request):
+        """Sign in with Microsoft. ?stepup=1: re-sign-in for a destructive admin action (§4.5.6); prompt=login
+        when the last Microsoft sign-in is older than 1 h."""
+        ip = request.client.host if request.client else "?"
+        if db.rate_limited(f"login:{ip}"):
+            raise HTTPException(429, "Too many sign-in attempts. Try again in 15 minutes.")
+        prompt = "select_account"
+        if request.query_params.get("stepup"):
+            last = _last_ms_signin(get_session(request))
+            if not last or D.utcnow() - last > STEPUP_LOGIN_AFTER:
+                prompt = "login"
+        flow = entra.begin_auth(cfg.redirect_uri, prompt=prompt)
+        flow.update(purpose="ms_signin", stepup=bool(request.query_params.get("stepup")))
+        _store_flow(flow)
+        return _redirect_to(flow)
+
+    @app.get("/login/microsoft")
+    def login_microsoft(request: Request):
+        return login(request)
+
+    def _ms_roles(groups: list[str], is_user: bool) -> set[str]:
+        s = settings()
+        roles = {ROLE_USER} if is_user else set()
+        if s.group_admins and s.group_admins in groups:
+            roles.add(ROLE_ADMIN)
+        if s.group_auditors and s.group_auditors in groups:
+            roles.add(ROLE_AUDITOR)
+        return roles
+
+    def _sync_roles(uid: str, roles: set[str], actor: str) -> None:
+        """SPEC §4.5.6: every Microsoft sign-in refreshes the stored roles, including removals."""
+        old, new = db.set_roles(uid, roles)
+        if old != new:
+            db.audit(actor, "roles_changed", uid, {"from": sorted(old), "to": sorted(new), "source": "entra"})
+
+    def _ms_claims_ok(c: dict) -> tuple[str, str]:
+        """-> (tid, oid). The real client already verified signature/iss/aud/times/nonce (odnas/oidc.py); this
+        re-checks what the web layer relies on, so a fake client can't skip it."""
+        tid = str(c.get("tid", ""))
+        if tid.lower() != cfg.tenant_id.lower():
+            raise HTTPException(403, "Wrong organisation.")
+        if c.get("iss") and c.get("iss") != oidc.ms_issuer(tid):
+            raise HTTPException(403, "Wrong organisation.")
+        oid = str(c.get("oid") or "")
+        if not oid:
+            raise HTTPException(403, "Microsoft did not return an account identity.")
+        return tid, oid
+
+    def _ms_user(tid: str, oid: str):
+        """The SpringSync user of this Entra identity: the identities table first, then the legacy column."""
+        ident = db.identity("entra", oidc.ms_issuer(tid), oid)
+        if ident:
+            return db.user_full(ident["user_id"])
+        return db.user_by_oid(oid)
+
+    def _ensure_entra_identity(uid: str, tid: str, oid: str, upn: str, by: str) -> int | None:
+        ident = db.identity("entra", oidc.ms_issuer(tid), oid)
+        if ident:
+            db.touch_identity(ident["id"], upn, False)
+            return int(ident["id"])
+        try:
+            iid = db.link_identity("entra", oidc.ms_issuer(tid), oid, uid, by, tid=tid, email=upn)
+        except Exception:     # the user already has another Entra identity: leave it, never re-point silently
+            return None
+        db.audit(oid, "identity_linked", uid, {"provider": "entra", "by": by})
+        return iid
+
+    @app.get(cfg.redirect_path)
+    def callback(request: Request):
+        flow = _take_flow(request)
+        purpose = flow.get("purpose", "ms_signin")
+        if purpose not in ("ms_signin", "ms_link"):
             raise HTTPException(400, "Sign-in session mismatch. Please start again.")
+        q = dict(request.query_params)
         res = entra.complete_auth(flow, q)
         if not res.ok:
             log.warning("sign-in failed: %s", res.error)
+            if res.error == "invalid_id_token":
+                _refused(request, "entra", res.error_description or "invalid_id_token")
             raise HTTPException(403, "Microsoft sign-in did not complete. " + (
                 "A sign-in policy blocked it; IT has been told." if res.classification == "blocked_by_ca" else
                 "Please try again."))
         c = res.id_claims
-        if c.get("tid", "").lower() != cfg.tenant_id.lower():
-            raise HTTPException(403, "Wrong organisation.")
+        try:
+            tid, oid = _ms_claims_ok(c)
+        except HTTPException:
+            _refused(request, "entra", "wrong_tenant_or_identity", issuer=str(c.get("iss", ""))[:120],
+                     sub=str(c.get("oid", "")))
+            raise
+        if purpose == "ms_link":
+            return _finish_ms_link(request, flow, c, tid, oid)
         upn = (c.get("preferred_username") or c.get("upn") or "").lower()
         if cfg.allowed_upn_domain and not upn.endswith("@" + cfg.allowed_upn_domain.lower()):
             raise HTTPException(403, "This account is not allowed.")
         if "_claim_names" in c and "groups" in c.get("_claim_names", {}):
             raise HTTPException(403, "Group overage: ask IT to restrict the groups claim to assigned groups.")
         s = settings()
-        groups = [g.lower() for g in c.get("groups", [])]
-        oid = c.get("oid", "")
-        data = {"oid": oid, "upn": upn, "name": c.get("name", upn), "groups": groups, "user_id": None}
+        guest = str(c.get("acct", "0")) == "1"   # §4.5.2 / §4.5.6: guests get no roles from Entra
+        groups = [] if guest else [g.lower() for g in c.get("groups", [])]
+        now = D.iso(D.utcnow())
+        data = {"auth": AUTH_MS, "oid": oid, "upn": upn, "name": c.get("name", upn), "groups": groups,
+                "user_id": None, "ms_at": now, "identity_id": None}
         is_user = bool(s.group_users) and s.group_users in groups
         allowed = is_user and (not s.pilot_only or upn in s.pilot_set())
-        u = db.user_by_oid(oid) if allowed else None
+        existing = _ms_user(tid, oid)
+        if existing is not None:   # roles follow Entra at every sign-in, also when access was just removed
+            _sync_roles(existing["id"], _ms_roles(groups, is_user), oid)
+        u = existing if allowed else None
         if allowed and (u is not None or res.refresh_token):
             new = u is None
+            if u is None and db.one("SELECT 1 FROM users WHERE lower(upn)=? AND entra_oid LIKE 'unlinked:%'", (upn,)):
+                db.audit(oid, "signin_refused", "", {"provider": "entra", "reason": "identity_unlinked", "upn": upn})
+                raise HTTPException(403, "Your Microsoft sign-in was removed from SpringSync. Ask IT.")
             if u is None:
                 # v0.9: the admin chooses the provider (Settings gdrive_users for new users, or the user page)
                 prov = cloud.PROVIDER_GD if upn in s.gdrive_user_set() else cloud.PROVIDER_OD
@@ -283,10 +457,12 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
                                      provider=prov, direction=s.default_direction, gdocs_mode=s.google_gdocs_default)
                 db.audit(oid, "user_connected", uid, {"upn": upn, "provider": prov,
                                                       "direction": s.default_direction})
+                _sync_roles(uid, _ms_roles(groups, is_user), oid)
                 u = db.user_full(uid)
             else:
                 uid = u["id"]
                 u = db.user_full(uid)
+            data["identity_id"] = _ensure_entra_identity(uid, tid, oid, upn, "self" if new else "migration")
             onedrive = cloud.provider(u) == cloud.PROVIDER_OD
             if onedrive and cloud.PROVIDER_OD not in s.providers():
                 db.audit(oid, "connect_denied_provider_disabled", uid, {"upn": upn, "provider": "onedrive"})
@@ -310,10 +486,134 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
             data["user_id"] = uid
         elif is_user and not allowed:
             db.audit(oid, "connect_denied_not_on_pilot", "", {"upn": upn})
-        db.audit(oid, "login", "", {"upn": upn})
+        db.audit(oid, "login", "", {"upn": upn, "provider": "microsoft", "stepup": bool(flow.get("stepup"))})
         resp = RedirectResponse("/", 303)
         resp.delete_cookie(flow_cookie, path="/auth")
+        old = get_session(request)
+        if old:
+            db.q("DELETE FROM sessions WHERE id=?", (old["_sid"],))   # a step-up replaces the Google session
         new_session(resp, data)
+        return resp
+
+    def _link_session(request: Request, flow: dict) -> dict:
+        """Self-link (§4.5.5 a): the callback must come back to the SAME signed-in session, for the same user."""
+        sess = get_session(request)
+        if not sess or sess["_sid"] != flow.get("sid") or sess.get("user_id") != flow.get("uid") \
+                or ROLE_USER not in roles_for(sess):
+            raise HTTPException(403, "Linking must finish in the session that started it. Please start again.")
+        if D.utcnow().timestamp() - float(flow.get("started", 0)) > LINK_WINDOW_S:
+            raise HTTPException(403, "The link request expired (10 minutes). Please start again.")
+        return sess
+
+    def _finish_ms_link(request: Request, flow: dict, c: dict, tid: str, oid: str):
+        """Link Microsoft (prompt=login; iat within 10 min). The refresh token from this step is discarded."""
+        sess = _link_session(request, flow)
+        uid = sess["user_id"]
+        iat = c.get("iat")
+        if iat is None or D.utcnow().timestamp() - float(iat) > LINK_WINDOW_S:
+            db.audit(sess["oid"], "identity_link_refused", uid, {"provider": "entra", "reason": "stale_sign_in"})
+            raise HTTPException(403, "That Microsoft sign-in was not fresh. Please start again.")
+        other = _ms_user(tid, oid)
+        if other is not None and other["id"] != uid:
+            db.audit(sess["oid"], "identity_link_refused", uid, {"provider": "entra", "reason": "belongs_to_other_user"})
+            raise HTTPException(409, "This Microsoft account belongs to another SpringSync user. Ask IT.")
+        if any(i["provider"] == "entra" for i in db.identities_for_user(uid)):
+            db.audit(sess["oid"], "identity_link_refused", uid, {"provider": "entra", "reason": "provider_already_linked"})
+            raise HTTPException(409, "You already have a Microsoft sign-in linked.")
+        upn = (c.get("preferred_username") or c.get("upn") or "").lower()
+        db.link_identity("entra", oidc.ms_issuer(tid), oid, uid, "self", tid=tid, email=upn)
+        db.q("UPDATE users SET entra_oid=? WHERE id=? AND entra_oid LIKE 'unlinked:%'", (oid, uid))
+        db.audit(sess["oid"], "identity_linked", uid, {"provider": "entra", "by": "self"})
+        guest = str(c.get("acct", "0")) == "1"
+        groups = [] if guest else [g.lower() for g in c.get("groups", [])]
+        s = settings()
+        _sync_roles(uid, _ms_roles(groups, bool(s.group_users) and s.group_users in groups), oid)
+        resp = RedirectResponse("/me/signin-methods?msg=linked", 303)
+        resp.delete_cookie(flow_cookie, path="/auth")
+        return resp
+
+    # ---- Sign in with Google (hotsprings.org Workspace only, identity only) ---------------------------
+    @app.get("/login/google")
+    def login_google(request: Request):
+        if not google_signin_on():
+            raise HTTPException(404, "Sign in with Google is not turned on.")
+        ip = request.client.host if request.client else "?"
+        if db.rate_limited(f"login:{ip}"):
+            raise HTTPException(429, "Too many sign-in attempts. Try again in 15 minutes.")
+        flow = google.begin_signin(cfg.google_signin_redirect_uri, settings().google_allowed_domain)
+        flow.update(purpose="google_signin")
+        _store_flow(flow)
+        return _redirect_to(flow)
+
+    def _google_suggestion(email: str, verified: bool) -> bool:
+        """§4.5.5 c: a hint only (never a link): the verified email matches exactly one user with an Entra identity."""
+        if not verified or not email:
+            return False
+        rows = db.all("SELECT id FROM users WHERE lower(upn)=? AND state != ?", (email.lower(), D.REMOVED))
+        return len(rows) == 1 and any(i["provider"] == "entra" for i in db.identities_for_user(rows[0]["id"]))
+
+    @app.get(cfg.google_signin_redirect_path)
+    def google_signin_callback(request: Request):
+        flow = _take_flow(request)
+        purpose = flow.get("purpose")
+        if purpose not in ("google_signin", "google_link"):
+            raise HTTPException(400, "Sign-in session mismatch. Please start again.")
+        if not google_signin_on():
+            _refused(request, "google", "google_signin_off")
+            raise HTTPException(403, "Sign in with Google is turned off. Sign in with Microsoft.")
+        res = google.complete_signin(flow, dict(request.query_params))
+        if not res.ok:
+            _refused(request, "google", (res.error_description if res.error == "invalid_id_token" else res.error)[:60])
+            raise HTTPException(403, "Google sign-in did not complete. Please try again, or sign in with Microsoft.")
+        c = res.id_claims
+        try:
+            sub, hd, email = check_signin_claims(c, settings().google_allowed_domain)
+        except ClaimsError as e:
+            _refused(request, "google", e.reason, issuer=oidc.GOOGLE_ISSUER, sub=str(c.get("sub", "")),
+                     hd=str(c.get("hd", ""))[:100])
+            raise HTTPException(403, str(e)) from None
+        auth_time = c.get("auth_time")
+        if purpose == "google_link":
+            sess = _link_session(request, flow)
+            uid = sess["user_id"]
+            if auth_time is not None and D.utcnow().timestamp() - float(auth_time) > LINK_WINDOW_S:
+                db.audit(sess["oid"], "identity_link_refused", uid, {"provider": "google", "reason": "stale_sign_in"})
+                raise HTTPException(403, "That Google sign-in was not fresh. Please start again.")
+            other = db.identity("google", oidc.GOOGLE_ISSUER, sub)
+            if other is not None and other["user_id"] != uid:
+                db.audit(sess["oid"], "identity_link_refused", uid, {"provider": "google", "reason": "belongs_to_other_user",
+                                                                     "sub_hash": _sub_hash(sub)})
+                raise HTTPException(409, "This Google account is already linked to another SpringSync user. Ask IT.")
+            if other is None and any(i["provider"] == "google" for i in db.identities_for_user(uid)):
+                db.audit(sess["oid"], "identity_link_refused", uid, {"provider": "google", "reason": "provider_already_linked"})
+                raise HTTPException(409, "You already have a Google sign-in linked. Remove it first.")
+            if other is None:
+                db.link_identity("google", oidc.GOOGLE_ISSUER, sub, uid, "self", hd=hd, email=email,
+                                 email_verified=True)
+                db.audit(sess["oid"], "identity_linked", uid, {"provider": "google", "by": "self", "hd": hd,
+                                                               "sub_hash": _sub_hash(sub), "email": email})
+            resp = RedirectResponse("/me/signin-methods?msg=linked", 303)
+            resp.delete_cookie(flow_cookie, path="/auth")
+            return resp
+        ident = db.identity("google", oidc.GOOGLE_ISSUER, sub)
+        if ident is None or (ident["hd"] or "") != hd:
+            _refused(request, "google", "not_linked", issuer=oidc.GOOGLE_ISSUER, sub=sub, email=email)
+            hint = (" If this is your work address, sign in with Microsoft, then use Link Google under My sign-in "
+                    "methods." if _google_suggestion(email, True) else "")
+            raise HTTPException(403, "Your Google account isn't linked to SpringSync yet. Sign in with Microsoft and "
+                                     "link it, or ask IT." + hint)
+        u = db.user_full(ident["user_id"])
+        db.touch_identity(ident["id"], email, True)
+        actor = f"google:{_sub_hash(sub)}"
+        data = {"auth": AUTH_GOOGLE, "oid": actor, "upn": u["upn"], "name": c.get("name", u["upn"]), "groups": [],
+                "user_id": u["id"], "identity_id": int(ident["id"]), "google_email": email}
+        roles, note = google_roles(data)
+        db.audit(actor, "login", u["id"], {"upn": u["upn"], "provider": "google", "roles": sorted(roles), "note": note})
+        if note == "admin_needs_ms":
+            db.audit(actor, "google_session_limited", u["id"], {"reason": "microsoft_sign_in_older_than_24h"})
+        resp = RedirectResponse("/", 303)
+        resp.delete_cookie(flow_cookie, path="/auth")
+        new_session(resp, data, hours=GOOGLE_SESSION_HOURS)
         return resp
 
     def reconnect_state(uid: str) -> None:
@@ -476,6 +776,72 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
             raise HTTPException(404, "No report yet.")
         return FileResponse(p, media_type="application/json", filename="preflight-report.json")
 
+    # ---- My sign-in methods (v0.12, SPEC v0.10.1 §4.5.5) -----------------------------------------------
+    def _methods(uid: str) -> list[dict]:
+        out = []
+        for i in db.identities_for_user(uid):
+            out.append({"id": i["id"], "provider": i["provider"],
+                        "label": {"entra": "Microsoft (work)", "google": "Google (Workspace)",
+                                  "msa": "Microsoft (personal)"}.get(i["provider"], i["provider"]),
+                        "email": i["display_email"] or "", "linked_at": i["linked_at"], "linked_by": i["linked_by"],
+                        "last_seen_at": i["last_seen_at"]})
+        return out
+
+    @me.get("/signin-methods", response_class=HTMLResponse)
+    def me_methods(request: Request, sess: dict = Depends(user_dep)):
+        uid = sess["user_id"]
+        m = _methods(uid)
+        have = {x["provider"] for x in m}
+        return render(request, "signin_methods.html", sess, methods=m,
+                      can_link_google=google_signin_on() and "google" not in have,
+                      can_link_ms="entra" not in have, ms_days=settings().google_signin_ms_max_age_days,
+                      msg=request.query_params.get("msg", ""))
+
+    @me.post("/signin-methods/link/google")
+    async def me_link_google(request: Request, sess: dict = Depends(user_dep)):
+        await check_csrf(request, sess)
+        if not google_signin_on():
+            raise HTTPException(404, "Sign in with Google is not turned on.")
+        if any(i["provider"] == "google" for i in db.identities_for_user(sess["user_id"])):
+            raise HTTPException(409, "You already have a Google sign-in linked. Remove it first.")
+        flow = google.begin_signin(cfg.google_signin_redirect_uri, settings().google_allowed_domain)
+        flow.update(purpose="google_link", uid=sess["user_id"], sid=sess["_sid"], started=D.utcnow().timestamp())
+        _store_flow(flow)
+        db.audit(sess["oid"], "identity_link_started", sess["user_id"], {"provider": "google"})
+        return _redirect_to(flow)
+
+    @me.post("/signin-methods/link/microsoft")
+    async def me_link_microsoft(request: Request, sess: dict = Depends(user_dep)):
+        await check_csrf(request, sess)
+        if any(i["provider"] == "entra" for i in db.identities_for_user(sess["user_id"])):
+            raise HTTPException(409, "You already have a Microsoft sign-in linked.")
+        flow = entra.begin_auth(cfg.redirect_uri, prompt="login")   # §4.5.5 a: a fresh Microsoft sign-in
+        flow.update(purpose="ms_link", uid=sess["user_id"], sid=sess["_sid"], started=D.utcnow().timestamp())
+        _store_flow(flow)
+        db.audit(sess["oid"], "identity_link_started", sess["user_id"], {"provider": "entra"})
+        return _redirect_to(flow)
+
+    def _unlink(iid: int, uid: str, actor: str, by: str) -> None:
+        ident = db.identity_by_id(iid)
+        if not ident or ident["user_id"] != uid:
+            raise HTTPException(404)
+        db.unlink_identity(iid)
+        ended = db.end_sessions(identity_id=iid)
+        if ident["provider"] == "entra":   # its Microsoft sessions too (they carry the oid, not always the id)
+            ended += db.end_sessions_for_oid(ident["subject"])
+        db.audit(actor, "identity_unlinked", uid, {"provider": ident["provider"], "by": by,
+                                                   "sub_hash": _sub_hash(ident["subject"]), "sessions_ended": ended})
+
+    @me.post("/signin-methods/{iid}/unlink")
+    async def me_unlink(iid: int, request: Request, sess: dict = Depends(user_dep)):
+        await check_csrf(request, sess)
+        uid = sess["user_id"]
+        if len(db.identities_for_user(uid)) < 2:
+            raise HTTPException(409, "You can't remove your only sign-in method.")
+        _unlink(iid, uid, sess["oid"], "self")
+        resp = RedirectResponse("/me/signin-methods?msg=unlinked", 303)
+        return resp
+
     app.include_router(me)
     app.state.templates_friendly = friendly
 
@@ -520,11 +886,16 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
                       google_configured=cfg.google_configured, backup_test=_backup_test_status(),
                       nas_pause=db.flag(D.NAS_GLOBAL_PAUSE), svc_test=svc_test_status(db),
                       auto_update=autoupdate.state(cfg, db),   # v0.11: read-only, the GUI never updates (§11.4.1)
+                      signin={"google_config": cfg.signin_google, "google_configured": cfg.google_configured,
+                              "google_on": google_signin_on(), "google_off_flag": db.flag(SIGNIN_GOOGLE_OFF),
+                              "google_users": db.one("SELECT count(*) n FROM identities WHERE provider='google'")["n"],
+                              "redirect_uri": cfg.google_signin_redirect_uri},
                       msg=request.query_params.get("msg", ""), err=request.query_params.get("err", ""))
 
     @adm.post("/settings")
     async def admin_settings_save(request: Request, sess: dict = Depends(admin_dep)):
         form = await check_csrf(request, sess)
+        need_microsoft(sess)   # §4.5.6: pilot list, NAS option/share, providers... always need a Microsoft session
         form.pop("csrf", None)
         try:
             changed = settings_store.update(db, cfg, kr, form, sess["oid"])
@@ -558,7 +929,50 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         return render(request, "user_detail.html", sess, u=u, runs=db.runs(uid, 30), issues=db.open_issues(uid),
                       nas=db.nas_credential_meta(uid), ms=db.cloud_credential(uid), admin=True,
                       safety=_safety_view(u, with_delta=True), cv=cloud.view(u, settings()),
-                      providers=settings().providers(), **_sm_user(u))
+                      providers=settings().providers(), methods=_methods(uid), **_sm_user(u))
+
+    @adm.post("/users/{uid}/identities/{iid}/unlink")
+    async def admin_unlink(uid: str, iid: int, request: Request, sess: dict = Depends(admin_dep)):
+        """§4.5.5 d: unlinking needs a Microsoft session; removing the last method disables the user."""
+        form = await check_csrf(request, sess)
+        need_microsoft(sess)
+        u = db.user_full(uid)
+        if not u:
+            raise HTTPException(404)
+        last = len(db.identities_for_user(uid)) < 2
+        if last and form.get("confirm") != u["upn"]:
+            raise HTTPException(400, "This is the user's last sign-in method: removing it disables the user. "
+                                     "Type the user's UPN to confirm.")
+        _unlink(iid, uid, sess["oid"], f"admin:{sess['upn']}")
+        if last and u["state"] not in (D.OFFBOARDING, D.REMOVED):
+            db.update_profile(uid, final_sync_requested=0)
+            db.set_state(uid, D.OFFBOARDING, f"last sign-in method removed by {sess['upn']}")
+            db.audit(sess["oid"], "user_disabled_no_signin_method", uid, {"upn": u["upn"]})
+        return RedirectResponse(f"/admin/users/{uid}", 303)
+
+    @adm.post("/settings/google-signin-off")
+    async def admin_google_signin_off(request: Request, sess: dict = Depends(admin_dep)):
+        """§4.5.9: the GUI can only turn Google sign-in OFF (kill switch); only the server CLI turns it back on."""
+        await check_csrf(request, sess)
+        need_microsoft(sess)
+        if db.flag(SIGNIN_GOOGLE_OFF) is None:
+            db.set_flag(SIGNIN_GOOGLE_OFF, "turned off in the GUI", by=sess["upn"])
+            ended = db.end_sessions(auth=AUTH_GOOGLE)
+            paused = []
+            for row in db.all("SELECT DISTINCT user_id FROM identities WHERE provider='google'"):
+                uid = row["user_id"]
+                if all(i["provider"] == "google" for i in db.identities_for_user(uid)):
+                    u = db.user(uid)
+                    if u and u["state"] not in (D.PAUSED, D.OFFBOARDING, D.REMOVED):
+                        db.set_state(uid, D.PAUSED, "Google sign-in turned off (Google is their only sign-in)")
+                        paused.append(uid)
+            db.audit(sess["oid"], "signin_google_disabled", "", {"sessions_ended": ended, "users_paused": len(paused),
+                                                                 "via": "gui"})
+            from odnas.notify import Alert
+            Alerter(db).raise_(Alert("signin_google_disabled", "high",
+                                     f"Google sign-in was turned off by {sess['upn']}: {ended} session(s) ended, "
+                                     f"{len(paused)} Google-only user(s) paused."))
+        return RedirectResponse("/admin/settings?msg=Google+sign-in+turned+off", 303)
 
     def _sm_user(u) -> dict:
         w = service_mode.user_window(u)
@@ -579,6 +993,8 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         actor, upn = sess["oid"], sess["upn"]
         if scope not in ("all", "selected") or op not in ("on", "off"):
             raise HTTPException(400, "bad service-mode request")
+        if op == "on":
+            need_microsoft(sess)   # §4.5.6 step-up
         if op == "on":
             try:
                 hours = service_mode.parse_hours(form.get("hours"))
@@ -679,6 +1095,8 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         actor = sess["oid"]
         if action not in ADMIN_USER_ACTIONS:
             raise HTTPException(404)
+        if action in STEPUP_ACTIONS:
+            need_microsoft(sess)
         details: dict = {"upn": u["upn"]}
         if action.startswith("safety-") and u["state"] != D.SAFETY_ABORT:
             raise HTTPException(409, "This user is not stopped by a safety abort.")
@@ -880,7 +1298,7 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         return render(request, "user_detail.html", sess, u=u, runs=db.runs(uid, 30), issues=db.open_issues(uid),
                       nas=db.nas_credential_meta(uid), ms=db.cloud_credential(uid), admin=False,
                       safety=_safety_view(u, with_delta=False), cv=cloud.view(u, settings()),
-                      providers=settings().providers(), **_sm_user(u))
+                      providers=settings().providers(), methods=_methods(uid), **_sm_user(u))
 
     def _audit_filter(request: Request) -> list:
         qp = request.query_params

@@ -307,3 +307,40 @@ them as written:
 7. ~~Windows~~: Ubuntu only in v0.11.0; Windows later as a Scheduled Task (SPEC §14.37).
 8. **Still open: tag signing** (SPEC §14.9). `require_signed_tags` and `allowed_signers` exist, but there's no
    signing key yet. Until there is one, the GitHub org must require 2FA for every owner and member.
+
+## J. v0.12 Sign in with Microsoft / Google (Dex, 2026-10-22)
+Built to SPEC v0.10.1 §4.5 (Mark's order, 4:38 PM CT). For Reid to confirm or move into SPEC:
+1. **Redirect path:** `/auth/google/signin/callback` (config `[google] signin_redirect_path`), on the existing
+   Internal client. Mark adds `https://sync.hotsprings.org/auth/google/signin/callback` in the Google console.
+2. **Switch name:** `[signin] google = true` as in §4.5.9 (with `microsoft_work`, always true, and
+   `personal_microsoft`, which must be false). The code default is **false** and the example file ships
+   `google = false`; the DEPLOY step sets it to true for the pilot. No Gmail setting.
+3. **Turning it back on after the GUI kill switch:** §4.5.9 says "needs the local config". Built as a server
+   CLI command (`springsync signin enable-google`, audited) that clears the kill flag; it refuses if the
+   config says `google = false`. A config edit alone doesn't clear the flag, so a kill isn't undone by an
+   unrelated restart.
+4. **Step-up list (§4.5.6):** Offboard, Accept deletes, Mirror baseline, set direction, set provider, Service
+   mode on (per user and global), every Settings save (covers pilot list, NAS option/share, providers), admin
+   unlink, and the kill switch. Pause/Resume, Approve initial sync, Retry and Restore stay allowed on a fresh
+   Google admin session. Role changes have no GUI (they come from Entra). Confirm.
+5. **N-day rule (§14.38–41, pending Mark):** setting `google_signin_ms_max_age_days` (1–90, default 7). Past it,
+   a Google session has **no access** (it asks for a Microsoft sign-in); it doesn't end the session.
+6. **Google session length 4 h** (Microsoft 8 h), because Google sign-in bypasses Entra Conditional Access
+   (§4.5.8 item 3). Not stated for Workspace accounts in SPEC; Dex's choice.
+7. **Skew:** 60 s as SPEC. Max token age 10 min after `iat` for both providers.
+8. **Last method removed by an admin** = the user goes to `offboarding` (credentials erased by the existing
+   offboarding job; files untouched), with the UPN typed to confirm. Users can't remove their last method.
+9. **Unlinking a Microsoft identity** renames `users.entra_oid` to `unlinked:<oid>:<time>` so the old account
+   can't re-attach by the legacy column; a later Microsoft sign-in with it is refused ("removed from
+   SpringSync. Ask IT.") instead of creating a second user. Re-linking it is through Link Microsoft from a
+   Google session (or an admin restore later).
+10. **Not built in v0.12.0:** admin invites / one-time links and **Google-only users** created by an admin with
+   a chosen NAS share (§4.5.5 b, §4.5.6). Until then every user starts with a Microsoft sign-in. No `invites`
+   table yet.
+11. **Microsoft sign-in still also connects OneDrive** (same scopes as before); only Link Microsoft discards
+   its refresh token. Splitting sign-in from connect is not in this release.
+12. **Google sessions** may change the NAS login and connect Google Drive like Microsoft sessions. Say if
+   those should need a Microsoft session too.
+13. `auth_time`: Google sends it only if enabled for the project; checked when present, otherwise the
+   10-minute, session-bound link request is the control (T-I1 records which).
+

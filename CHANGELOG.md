@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.12.0 (2026-10-22)
+- **New: "Sign in with Microsoft" and "Sign in with Google"** on the login page (SPEC v0.10.1 §4.5; Mark's
+  order, Oct 22, 2026 4:38 PM CT). Google is **hotsprings.org Workspace accounts only**, identity only
+  (`openid email profile`), through the existing Internal OAuth client on its own redirect path
+  `/auth/google/signin/callback` (separate from Connect Google Drive). Off unless the local config says
+  `[signin] google = true` (docs/DEPLOY.md "Enable Google sign-in"). No personal-Gmail setting exists.
+- **Every ID token is now verified in our own code** (`odnas/oidc.py`, PyJWT), for both providers and also for
+  Connect Google Drive: RS256 signature against the provider's JWKS (cached 1 h, refetched on an unknown `kid`
+  at most every 5 min; `alg=none`/HS256 refused), exact `iss` (Google: `https://accounts.google.com` or
+  `accounts.google.com`; Microsoft: `https://login.microsoftonline.com/<tid>/v2.0` for the token's own `tid`,
+  and `tid` must be the VHS tenant), `aud` (a list must hold only our client ID), `exp`/`nbf`/`iat` with 60 s
+  skew and at most 10 min old, and the single-use nonce. Google also needs `hd == google_allowed_domain`
+  from the verified token (the `hd` URL parameter is only a hint) and `email_verified` true. Microsoft needs
+  `oid`; guests (`acct=1`) get no roles. Before, MSAL's unverified claims were trusted. Every refusal writes a
+  rate-limited `signin_refused` audit entry (issuer, a hash of the subject, the reason).
+- **Identities** (schema 9, expand-only): new `identities` table keyed by (provider, issuer, subject), unique,
+  one per provider per user, with `linked_by`. Existing users get their Microsoft identity at upgrade
+  (`linked_by = migration`). **Never linked by email.**
+- **My sign-in methods** page: **Link Google sign-in** (from a Microsoft session; must come back to the same
+  session within 10 min; `auth_time` checked when Google sends it) and **Link Microsoft sign-in**
+  (`prompt=login`, `iat` within 10 min; the refresh token from that step is discarded). A user can remove a
+  method only if another one remains. An unlinked Google account is refused with "Your Google account isn't
+  linked to SpringSync yet…"; when its verified email matches exactly one user who has a Microsoft
+  identity, the message also suggests signing in with Microsoft to link it (a hint only).
+- **Admin user page** lists each user's sign-in methods and can unlink them (needs a Microsoft session;
+  removing the last method needs the UPN typed and disables the user by starting offboarding). The auditor
+  view shows the list without the buttons. Link, unlink and refusal are each audited once.
+- **Roles live on the user** (`users.roles`, `roles_synced_at`) and are refreshed from Entra at every
+  Microsoft sign-in, including removals (`roles_changed` audit). A Google session is User (if the stored roles
+  and pilot list allow it); Admin/Auditor only within 24 h of the last Microsoft sign-in, otherwise the
+  banner "Sign in with Microsoft to use admin tools". After `google_signin_ms_max_age_days` (new setting,
+  default 7) without a Microsoft sign-in, a Google session has no access. Google sessions last 4 h.
+- **Step-up:** Offboard, Accept deletes, Mirror baseline, direction and provider changes, Settings saves,
+  Service mode on, admin unlinking and the Google kill switch always need a Microsoft session; from a Google
+  session they show "Sign in with Microsoft to continue" (`/login?stepup=1`, `prompt=login` if the last
+  Microsoft sign-in is over 1 h old).
+- **Kill switch:** Settings → Sign-in methods → "Turn off Google sign-in now" ends all Google sessions,
+  pauses Google-only users and raises a `high` alert. The GUI can't turn it back on; the server CLI does:
+  `springsync signin enable-google` (audited). New `springsync signin status`.
+- A Microsoft account whose identity an admin unlinked can no longer silently get a new user row.
+- `pyjwt` is now a direct dependency (`requirements.in`); it was already pinned in `requirements.lock` (MSAL).
+- Tests: `tests/test_v12_signin.py` (75), real RSA keys; T-I1 notes in docs/DEPLOY.md.
+- Not built yet (OPEN-QUESTIONS §J): admin invites and Google-only users (§4.5.5 b).
+
 ## 0.11.0 (2026-10-22)
 - **New: opt-in nightly auto-update for the Ubuntu host** (SPEC §11.4.1; approved by Mark on Oct 22, 2026).
   **Off by default** (`[auto_update] enabled = false`). When on, `<slug>-autoupdate.timer` (02:45 Central +

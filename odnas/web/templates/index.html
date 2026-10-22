@@ -1,6 +1,10 @@
 {% extends "base.html" %}{% block body %}
 <h1>{{ product }}</h1>
-<p>Keeps your cloud files (Microsoft OneDrive or Google Drive) and your NAS home folder in sync. Everyone signs in with their Visit Hot Springs Microsoft account; if your cloud drive is Google Drive, you connect it from your status page after signing in.</p>
-<p><a href="/login"><button>Sign in with Microsoft</button></a></p>
-{% if sess %}<p class="msg">You're signed in, but you don't have access yet. During the pilot, IT has to add you to the pilot list.</p>{% endif %}
+<p>Keeps your cloud files (Microsoft OneDrive or Google Drive) and your NAS home folder in sync. Sign in with your Visit Hot Springs Microsoft account{% if google_signin %}, or with your Visit Hot Springs Google account once you have linked it{% endif %}. If your cloud drive is Google Drive, you connect it from your status page after signing in.</p>
+<p><a href="/login"><button>Sign in with Microsoft</button></a>
+{% if google_signin %} <a href="/login/google"><button>Sign in with Google</button></a>{% endif %}</p>
+{% if google_signin %}<p><small>Sign in with Google works only for a hotsprings.org Google account that is already linked to your SpringSync account. To link it, sign in with Microsoft and open My sign-in methods.</small></p>{% endif %}
+{% if sess %}{% if note == 'ms_signin_required' %}<p class="msg err">It's been too long since you last signed in with Microsoft. Sign in with Microsoft to keep using SpringSync.</p>
+{% elif note in ('google_off', 'unlinked', 'inactive') %}<p class="msg err">Your Google sign-in can't be used right now. Sign in with Microsoft.</p>
+{% else %}<p class="msg">You're signed in, but you don't have access yet. During the pilot, IT has to add you to the pilot list.</p>{% endif %}{% endif %}
 {% endblock %}

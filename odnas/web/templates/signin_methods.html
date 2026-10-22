@@ -1,0 +1,13 @@
+{% extends "base.html" %}{% block body %}
+<h1>My sign-in methods</h1>
+{% set m = {'linked':'Sign-in method linked.','unlinked':'Sign-in method removed.'} %}
+{% if msg %}<p class="msg">{{ m.get(msg, '') }}</p>{% endif %}
+<table><tr><th>Method</th><th>Account</th><th>Linked</th><th>Last used</th><th></th></tr>
+{% for x in methods %}<tr><td>{{ x.label }}</td><td>{{ x.email }}</td><td>{{ x.linked_at|local }}</td><td>{{ x.last_seen_at|local }}</td>
+<td>{% if methods|length > 1 %}<form method="post" action="/me/signin-methods/{{ x.id }}/unlink"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Remove</button></form>{% else %}<small>your only method</small>{% endif %}</td></tr>
+{% endfor %}</table>
+{% if can_link_google %}<form method="post" action="/me/signin-methods/link/google"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Link Google sign-in</button></form>
+<p><small>You'll be sent to Google to choose your hotsprings.org Google account. Finish within 10 minutes. This only lets you sign in with Google; it does not connect Google Drive.</small></p>{% endif %}
+{% if can_link_ms %}<form method="post" action="/me/signin-methods/link/microsoft"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Link Microsoft sign-in</button></form>{% endif %}
+<p><small>Admin tools and some actions always need a Microsoft sign-in. If you only use Google, you still need to sign in with Microsoft at least every {{ ms_days }} days.</small></p>
+{% endblock %}

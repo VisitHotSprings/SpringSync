@@ -266,6 +266,11 @@ SPECS: dict[str, Spec] = {
     "google_export_formats": Spec("Google", "Export formats (one-way export only)", _formats, "docx,xlsx,pptx,svg"),
     "google_client_secret_expires_on": Spec("Google", "Google client secret: rotate by (YYYY-MM-DD)",
                                             _date_or_empty, ""),
+    "google_signin_ms_max_age_days": Spec(
+        "Google", "Sign in with Google: require a Microsoft sign-in every (days)", _int(1, 90), 7,
+        help="A Google session gets no access until the person signs in with Microsoft again once this many days have "
+             "passed since their last Microsoft sign-in (SPEC §14.38-§14.41, pending Mark). Admin and Auditor need a "
+             "Microsoft sign-in within 24 h."),
     # Entra
     "group_users": Spec("Entra", "Users group object ID", _guid_or_empty, ""),
     "group_admins": Spec("Entra", "Admins group object ID", _guid_or_empty, ""),

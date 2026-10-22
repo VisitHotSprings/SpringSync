@@ -66,7 +66,7 @@ def test_config_validation(monkeypatch):
     native = load_config(env=hs)
     assert native.host == ("windows" if os.name == "nt" else "linux")
     assert native.p_db == (w.p_db if os.name == "nt" else c.p_db)
-    assert c.user_agent == "NONISV|VisitHotSprings|HomeSync/0.11"
+    assert c.user_agent == "NONISV|VisitHotSprings|HomeSync/0.12"
 
 
 def test_config_toml(tmp_path):

@@ -64,6 +64,7 @@ class Config:
     google_client_id: str = ""
     google_allowed_domain: str = ""   # bootstrap default for the google_allowed_domain setting (SPEC §8.2)
     google_redirect_path: str = "/auth/google/callback"
+    google_signin_redirect_path: str = "/auth/google/signin/callback"   # v0.12: Sign in with Google (identity only)
     # [paths] (empty = derived from slug)
     db_path: str = ""
     state_dir: str = ""
@@ -79,6 +80,11 @@ class Config:
     # [nas] bootstrap defaults (GUI settings override)
     nas_host: str = "unas.hotsprings.local"
     nas_share: str = "Personal-Drive"
+    # [signin] (v0.12, SPEC v0.10.1 §4.5.9). Local config only; the GUI can turn Google sign-in OFF, never on.
+    # There is deliberately no setting for personal Gmail (SPEC §4.5.4: out entirely).
+    signin_microsoft_work: bool = True      # always on (the VHS single-tenant org app)
+    signin_google: bool = False             # Sign in with Google, google_allowed_domain Workspace accounts only
+    signin_personal_microsoft: bool = False # §4.5.3, not built: must stay false
     # [auto_update] (v0.11, SPEC §11.4.1). Off by default; only the server's local config can turn it on.
     auto_update_enabled: bool = False
     auto_update_repo: str = "VisitHotSprings/SpringSync"   # public GitHub repo whose releases are checked
@@ -152,6 +158,12 @@ class Config:
     @property
     def google_configured(self) -> bool: return bool(self.google_client_id)
     @property
+    def google_signin_redirect_uri(self) -> str: return self.base_url.rstrip("/") + self.google_signin_redirect_path
+    @property
+    def google_signin_available(self) -> bool:
+        """Local config switch on AND the Google OAuth client configured (the GUI kill switch is checked by the web app)."""
+        return self.signin_google and self.google_configured
+    @property
     def broker_base(self) -> str: return f"http://{self.broker_host}:{self.broker_port}"
 
     # ---- secrets (never logged, never in repr) --------------------------
@@ -183,6 +195,13 @@ class Config:
             errs.append("google_client_id must look like <digits>-<id>.apps.googleusercontent.com")
         if not self.google_redirect_path.startswith("/auth/") or self.google_redirect_path == self.redirect_path:
             errs.append("google_redirect_path must be under /auth/ and differ from the Microsoft redirect path")
+        paths = {self.redirect_path, self.google_redirect_path, self.google_signin_redirect_path}
+        if not self.google_signin_redirect_path.startswith("/auth/") or len(paths) != 3:
+            errs.append("google_signin_redirect_path must be under /auth/ and differ from the other redirect paths")
+        if self.signin_personal_microsoft:
+            errs.append("[signin] personal_microsoft is not built (SPEC §4.5.3, off for the pilot); keep it false")
+        if not self.signin_microsoft_work:
+            errs.append("[signin] microsoft_work is always on (SPEC §4.5.9)")
         if self.credential_type not in (CRED_CERT, CRED_SECRET):
             errs.append("credential_type must be certificate|secret")
         if self.token_mode not in (TOKEN_MODE_BROKER, TOKEN_MODE_TMPFS):
@@ -208,7 +227,7 @@ class Config:
         return self
 
 
-_SECTIONS = ("app", "entra", "google", "paths", "nas", "auto_update")
+_SECTIONS = ("app", "entra", "google", "paths", "nas", "auto_update", "signin")
 
 
 def load_config(path: str | None = None, env: dict[str, str] | None = None) -> Config:
@@ -224,6 +243,8 @@ def load_config(path: str | None = None, env: dict[str, str] | None = None) -> C
             if sec == "google":   # SPEC §8.2: [google] client_id / allowed_domain -> google_client_id / ...
                 values.update({(k if k.startswith("google_") else "google_" + k): v
                                for k, v in data.get(sec, {}).items()})
+            elif sec == "signin":        # SPEC §4.5.6: [signin] google = true -> signin_google
+                values.update({"signin_" + k: v for k, v in data.get(sec, {}).items()})
             elif sec == "auto_update":   # SPEC §11.4.1: [auto_update] enabled = true -> auto_update_enabled
                 values.update({"auto_update_" + k: v for k, v in data.get(sec, {}).items()})
             else:

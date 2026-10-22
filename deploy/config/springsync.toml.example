@@ -29,6 +29,17 @@ group_auditors = ""
 client_id = ""                 # <digits>-<id>.apps.googleusercontent.com
 allowed_domain = "hotsprings.org"
 # redirect_path = "/auth/google/callback"
+# v0.12: "Sign in with Google" (identity only: openid email profile) uses the same client on its own path.
+# Add https://<your host><signin_redirect_path> as an Authorized redirect URI in the Google client (DEPLOY.md).
+# signin_redirect_path = "/auth/google/signin/callback"
+
+[signin]
+# v0.12 (SPEC v0.10.1 §4.5.9): which sign-in buttons the login page shows. LOCAL CONFIG ONLY: the admin GUI
+# shows this and can only turn Google OFF (kill switch, which "odnas signin enable-google" undoes).
+microsoft_work = true          # always on (it can't be turned off)
+google = false                 # true = "Sign in with Google" for hotsprings.org Workspace accounts (needs [google] client_id)
+personal_microsoft = false     # not available (SPEC §4.5.3); must stay false
+# There is no personal-Gmail setting: consumer Google accounts can never sign in.
 
 [nas]
 nas_host = "unas.hotsprings.local"

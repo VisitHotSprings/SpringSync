@@ -117,6 +117,82 @@ boundary.
 **Run one check by hand:** `sudo systemctl start springsync-autoupdate.service` (the same 24 h and patch-only
 rules apply). A manual `update.sh <tag>` skips the waiting period and can install any `vX.Y.Z`.
 
+## Enable Google sign-in
+v0.12, SPEC v0.10.1 §4.5. Adds a **Sign in with Google** button next to **Sign in with Microsoft**, for
+hotsprings.org Google Workspace accounts only. It's identity only (`openid email profile`): it doesn't connect
+Google Drive, and it never creates a user. A person can use it only after **linking** their Google account
+from **My sign-in methods** while signed in with Microsoft (or after IT links it). Roles still come only from
+Entra: a Google session is **User**, plus Admin/Auditor only within 24 h of the person's last Microsoft
+sign-in; destructive admin actions always ask for a Microsoft sign-in. Without a Microsoft sign-in for
+`google_signin_ms_max_age_days` (Settings → Google, default 7) a Google session has no access.
+
+This uses the **existing** Internal OAuth client (`[google] client_id` and the `google-client.secret`
+credential). No new Google project, no new secret.
+
+**From a v0.10.3 server that already has the Google client ID and secret** (config
+`/etc/springsync/springsync.toml` with `[google] client_id` and `allowed_domain`). Needs Mark's OK.
+
+1. **Google Cloud console** (Mark's Google admin sign-in): APIs & Services → Credentials → the existing
+   SpringSync **Web application** client → *Authorized redirect URIs* → **add** (keep the existing
+   `/auth/google/callback` one):
+   ```
+   https://sync.hotsprings.org/auth/google/signin/callback
+   ```
+   Save. Google says changes can take a few minutes to apply. No new scopes are needed on the consent screen
+   (`openid`, `email` and `profile` are basic scopes).
+2. **Update to v0.12.0** (as root on the server). `update.sh` drains, backs up the DB (`pre-v0.12.0`), runs
+   the smoke tests, migrates the DB (schema 9: the `identities` table; existing users get their Microsoft
+   identity row), restarts and health-checks, and rolls back on failure:
+   ```
+   sudo /opt/springsync/current/deploy/update.sh v0.12.0
+   ```
+   Then re-run the installer once, because a server installed before v0.11.0 doesn't have the v0.11
+   auto-update timer and the update-lock tmpfiles entry (`update.sh` doesn't install systemd units). It's
+   idempotent and keeps keys, the DB and the config; auto-update stays **off** unless you turn it on:
+   ```
+   cd /opt/springsync/current/deploy && sudo ./install.sh --version v0.12.0
+   ```
+3. **Check that the web service can read the Google secret** (the token exchange for sign-in runs in the web
+   service, so the Google drop-in from "Google Cloud project and OAuth client" step 7 must exist for
+   **`springsync-web`**, not only the worker):
+   ```
+   systemctl cat springsync-web | grep -q 'LoadCredentialEncrypted=google-client.secret' && echo ok || echo "MISSING: add the google.conf drop-in for springsync-web"
+   ```
+4. **Turn it on in the local config** (the admin GUI can only show it or turn it off):
+   ```
+   sudo tee -a /etc/springsync/springsync.toml >/dev/null <<'TOML'
+
+   [signin]
+   microsoft_work = true
+   google = true
+   personal_microsoft = false
+   TOML
+   sudo -u springsync env ODNAS_CONFIG=/etc/springsync/springsync.toml springsync signin status
+   sudo systemctl restart springsync-web
+   ```
+   `signin status` also checks the file: it should print `"google_available": true` and the redirect URI from
+   step 1 (a config error is printed instead, and nothing is restarted until it's fixed). If the file
+   already has a `[signin]` section, change `google = false` to `google = true` instead of appending.
+   Don't add a second `[signin]` (TOML refuses duplicate sections and the service won't start).
+5. **Test (T-I1, SPEC §12.2)** with a test account before telling staff: the login page shows both buttons;
+   Sign in with Google before linking is refused ("isn't linked to SpringSync yet"); sign in with Microsoft
+   → My sign-in methods → Link Google sign-in → choose the hotsprings.org account → Sign in with Google now
+   works; a gmail.com account is refused; Admin → user page lists both sign-in methods. Record the result in
+   the pilot log.
+
+**Turn it off (emergency):** Admin → Settings → Sign-in methods → **Turn off Google sign-in now** (needs a
+Microsoft sign-in). It ends every Google session immediately, pauses users whose only sign-in is Google,
+and raises a `high` alert. The GUI can't turn it back on. Once the cause is fixed:
+```
+sudo -u springsync env ODNAS_CONFIG=/etc/springsync/springsync.toml springsync signin enable-google
+```
+(audited). To turn it off permanently (e.g. at the M365 cutover, SPEC §4.5.4), set `google = false` under
+`[signin]` and `sudo systemctl restart springsync-web`. Then remove the redirect URI in the Google console.
+
+**Roll back:** `sudo /opt/springsync/current/deploy/rollback.sh` returns to the previous release. The schema 9
+change is expand-only (a new table and two new `users` columns), so v0.11/v0.10.3 run on it unchanged; Google
+sign-in is simply gone until v0.12 is back.
+
 ## Services
 | Unit | Starts at boot | Restart |
 |---|---|---|
@@ -193,7 +269,9 @@ nothing is replaced or removed without a backup.
 3. OAuth consent screen: **Internal** user type; scopes `openid`, `email`,
    `https://www.googleapis.com/auth/drive` (Walter reviews the scope, §14.19).
 4. Credentials → OAuth client ID → **Web application**; authorised redirect URI
-   `https://sync.hotsprings.org/auth/google/callback`. No JavaScript origins.
+   `https://sync.hotsprings.org/auth/google/callback`. No JavaScript origins. v0.12 Sign in with Google adds a
+   second redirect URI on the same client, `https://sync.hotsprings.org/auth/google/signin/callback`
+   (see "Enable Google sign-in").
 5. Google Admin console → Security → API controls → App access control: mark the client as **Trusted**
    (so Drive access isn't blocked by the Workspace policy).
 6. Put the client ID in `/etc/<slug>/springsync.toml` under `[google] client_id`, and
@@ -236,6 +314,25 @@ that changes the NAS, Entra, Google Admin or DNS needs Mark's OK first.
 | 5 | T-G1 (Google Cloud project, Internal client, Trusted app; **needs Mark's OK**) | T-G2 | a hotsprings.org test account connects; an outside account is refused |
 | 6 | **T-G2: Google token refresh through the broker** | **any real Google user is connected** | see below |
 | 7 | T-G3 (Docs skipped/exported, shortcuts, duplicates, trash, 403/429 back-off) | the Google pilot user | documented behaviour, no data loss |
+| 8 | **T-I1** (sign-in validation, both buttons; linking and roles; SPEC §12.2) | telling staff about Sign in with Google | see below |
+
+### T-I1 (before staff use Sign in with Google)
+Status: **not run**. The checks are unit-tested with real RS256 keys against `odnas/oidc.py`
+(`tests/test_v12_signin.py`), and the web flows with a fake provider. What only the lab can show:
+- **Google:** a hotsprings.org test account signs in after linking. A gmail.com account is refused (Google's
+  Internal client already stops it with `org_internal`; our missing-`hd` check is the second line). Wrong
+  `hd`, missing `hd`, wrong `aud`, expired token, bad signature (tampered payload, unknown `kid`) and a
+  replayed callback are refused and each writes one `signin_refused` audit entry (rate-limited). Note whether
+  Google returns `auth_time` (if it does, Link Google also requires it to be under 10 min old).
+- **Microsoft:** wrong `aud`, expired token, bad signature, replayed nonce, foreign `tid`, `iss`/`tid`
+  mismatch and missing `oid` are refused (`invalid_id_token` in the log, `signin_refused` in the audit). A
+  guest (`acct=1`) gets no roles.
+- **Linking and roles:** Link Google and Link Microsoft each finish within 10 min in the same session; a
+  stale link request is refused; a Google account linked to someone else is refused; matching email never
+  links. An Admin on a Google session more than 24 h after their last Microsoft sign-in sees "Sign in with
+  Microsoft to use admin tools"; Offboard, Accept deletes, Mirror baseline, direction/provider changes,
+  Settings saves, Service mode on, unlinking and the kill switch ask for a Microsoft sign-in. The kill switch
+  ends Google sessions at once.
 
 ### T-G2 (required before ANY real Google user is connected)
 Status: **not run** (no Google project exists yet; it depends on T-G1). The code is built and unit-tested

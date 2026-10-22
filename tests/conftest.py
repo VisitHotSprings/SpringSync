@@ -63,7 +63,8 @@ class FakeEntra:
         self.claims = {}
         self.rt_counter = 0
 
-    def begin_auth(self, redirect_uri):
+    def begin_auth(self, redirect_uri, prompt="select_account"):
+        self.prompts = getattr(self, "prompts", []) + [prompt]
         return {"state": "st-" + os.urandom(4).hex(), "auth_uri": "https://login.example.invalid/authorize",
                 "redirect_uri": redirect_uri}
 

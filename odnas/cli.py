@@ -25,6 +25,14 @@ def _ctx():
     return cfg, D.DB(cfg.p_db), Keyring.from_config(cfg)
 
 
+def _cfg_db():
+    """Config + DB only (no keys): for commands run by an admin as the service account."""
+    from odnas import db as D
+    from odnas.config import load_config
+    cfg = load_config()
+    return cfg, D.DB(cfg.p_db)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="odnas")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -54,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
     au.add_argument("--event", default="", choices=["", "installed", "failed", "refused_unsigned", "reenabled",
                                                        "backup_running", "busy"])
     au.add_argument("--tag", default=""); au.add_argument("--from", dest="from_", default="")
+    si = sub.add_parser("signin", help="sign-in methods (SPEC §4.5.9): status, or turn Google back on after the GUI kill switch")
+    si.add_argument("action", choices=["status", "enable-google"])
     sub.add_parser("keygen", help="create data.key and the Entra certificate if missing (Windows installer)")
     sc = sub.add_parser("secrets"); sc.add_argument("action", choices=["ingest", "status"])
     a = ap.parse_args(argv)
@@ -117,7 +127,31 @@ def main(argv: list[str] | None = None) -> int:
         from odnas import db as D
         from odnas.config import load_config
         cfg = load_config()
-        print("schema version", D.DB(cfg.p_db).migrate())
+        dbx = D.DB(cfg.p_db)
+        print("schema version", dbx.migrate())
+        n = dbx.backfill_entra_identities(cfg.tenant_id)   # v0.12 §4.5.7
+        if n:
+            print("entra identities backfilled", n)
+        return 0
+    if a.cmd == "signin":
+        cfg, db = _cfg_db()
+        off = db.flag("signin_google_off")
+        if a.action == "enable-google":
+            if not cfg.signin_google:
+                print("Google sign-in is off in the local config: set [signin] google = true first (DEPLOY.md).")
+                return 2
+            if off is None:
+                print("Google sign-in is not turned off; nothing to do.")
+                return 0
+            db.clear_flag("signin_google_off")
+            db.audit("system", "signin_google_enabled", "", {"via": "cli", "was_off_since": off["set_at"]})
+            print("Google sign-in turned back on. Users paused by the kill switch stay paused; resume them in the GUI.")
+            return 0
+        print(json.dumps({"microsoft_work": True, "google_config": cfg.signin_google,
+                          "google_client_configured": cfg.google_configured,
+                          "google_killed_in_gui": off is not None,
+                          "google_available": cfg.google_signin_available and off is None,
+                          "google_redirect_uri": cfg.google_signin_redirect_uri}))
         return 0
     if a.cmd == "check-config":
         cfg, db, kr = _ctx()

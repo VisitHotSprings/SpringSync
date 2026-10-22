@@ -98,6 +98,12 @@
 <button>Offboard (erase stored credentials)</button></form>
 <small>Files on the NAS and in {{ cv.cloud_side }} are not touched.</small></fieldset>
 {% endif %}
+<h2>Sign-in methods</h2>
+<table><tr><th>Method</th><th>Account</th><th>Linked</th><th>Last used</th>{% if admin %}<th></th>{% endif %}</tr>
+{% for m in methods %}<tr><td>{{ m.label }}</td><td>{{ m.email }}</td><td>{{ m.linked_at|local }} ({{ m.linked_by }})</td><td>{{ m.last_seen_at|local }}</td>
+{% if admin %}<td><form method="post" action="/admin/users/{{ u.id }}/identities/{{ m.id }}/unlink"><input type="hidden" name="csrf" value="{{ csrf }}">{% if methods|length < 2 %}<label>Last method: removing it disables the user. Type the UPN <input type="text" name="confirm"></label>{% endif %}<button>Unlink</button></form></td>{% endif %}</tr>
+{% else %}<tr><td colspan="5">none</td></tr>{% endfor %}</table>
+<p><small>Sign-in methods are linked only by the user (from a signed-in session) and never by matching email. Unlinking ends that method's sessions; it needs a Microsoft sign-in.</small></p>
 <h2>Open issues</h2><ul>{% for i in issues %}<li>{{ i.type }} ({{ i.severity }}): {{ i.summary|local_text }}</li>{% else %}<li>none</li>{% endfor %}</ul>
 <h2>Runs</h2>
 <table><tr><th>Started</th><th>Ended</th><th>Kind</th><th>Exit</th><th>Result</th><th>Copied</th><th>Deleted / moved</th><th>Bytes</th><th>Conflicts</th><th>Errors</th><th>Detail</th></tr>
