@@ -185,6 +185,7 @@ def test_unreachable_test_mount_retries_after_5_min(cfg, db, kr, entra):
     w.tick(t0, wait=True); w.tick(t0 + timedelta(minutes=1), wait=True)
     assert len([c for c in hr.calls if c[0] == "verify"]) == 1
     hr.codes["verify"] = 0
+    hr.codes["mount"] = 0   # the new password works for mounts too (else a slot boundary in the 6 min re-pauses)
     w.tick(t0 + timedelta(minutes=6), wait=True)
     assert db.flag(D.NAS_GLOBAL_PAUSE) is None
 

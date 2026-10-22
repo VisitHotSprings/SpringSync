@@ -123,6 +123,74 @@ def _free(v: str) -> str:
     return v
 
 
+PROVIDER_NAMES = ("onedrive", "gdrive")       # odnas.cloud.PROVIDERS (kept here to avoid an import cycle)
+DIRECTION_NAMES = ("two_way", "pull_copy", "pull_mirror")   # odnas.cloud.DIRECTIONS
+EXPORT_FORMATS = ("docx", "xlsx", "pptx", "svg", "odt", "ods", "odp", "pdf", "rtf", "txt", "csv", "html", "epub",
+                  "jpg", "png", "zip", "tsv")   # rclone drive export extensions we allow (rclone.org/drive)
+
+
+def _providers(v: str) -> str:
+    items = {x.strip().lower() for x in re.split(r"[,\s;]+", str(v or "")) if x.strip()}
+    bad = items - set(PROVIDER_NAMES)
+    if bad:
+        raise ValueError("unknown provider(s): " + ", ".join(sorted(bad)) + " (use onedrive, gdrive)")
+    if not items:
+        raise ValueError("enable at least one provider")
+    return ",".join(p for p in PROVIDER_NAMES if p in items)
+
+
+def _domain(v: str) -> str:
+    d = str(v or "").strip().lower().lstrip("@")
+    if not HOST_RE.match(d) or "." not in d:
+        raise ValueError(f"not a domain name: {d}")
+    return d
+
+
+def _direction(v: str) -> str:
+    v = str(v or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if v not in DIRECTION_NAMES:
+        raise ValueError("two_way, pull_copy (one-way: Copy only) or pull_mirror (one-way: Mirror)")
+    return v
+
+
+def _gdocs(v: str) -> str:
+    v = str(v or "").strip().lower()
+    if v not in ("skip", "export"):
+        raise ValueError("skip or export")
+    return v
+
+
+def _formats(v: str) -> str:
+    items = [x.strip().lower().lstrip(".") for x in re.split(r"[,\s;]+", str(v or "")) if x.strip()]
+    bad = [x for x in items if x not in EXPORT_FORMATS]
+    if bad or not items:
+        raise ValueError("comma-separated rclone export extensions, e.g. docx,xlsx,pptx,svg")
+    return ",".join(dict.fromkeys(items))
+
+
+def _aliases(v: str) -> str:
+    """Approved Google email aliases (SPEC v0.9 §4.4, §14.24): one `upn = google-email` per line."""
+    out = []
+    for raw in str(v or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.count("=") != 1:
+            raise ValueError(f"use 'upn = google-email' per line: {line}")
+        a, b = (x.strip().lower() for x in line.split("="))
+        if not EMAIL_RE.match(a) or not EMAIL_RE.match(b):
+            raise ValueError(f"not an email address in: {line}")
+        out.append(f"{a} = {b}")
+    return "\n".join(sorted(set(out)))
+
+
+def _backup_target(v: str) -> str:
+    v = str(v or "").strip().lower()
+    if v not in ("backup_nas", "same_share"):
+        raise ValueError("backup_nas (UNAS #2 share) or same_share (.springsync-archive on the user's share)")
+    return v
+
+
 @dataclass(frozen=True)
 class Spec:
     group: str
@@ -168,6 +236,36 @@ SPECS: dict[str, Spec] = {
     # Pilot
     "pilot_only": Spec("Pilot", "Pilot-only mode", _bool, True),
     "pilot_list": Spec("Pilot", "Pilot UPNs (one per line)", _upns, ""),
+    # Cloud providers and sync direction (v0.9, SPEC §4.4, §6.6)
+    "providers_enabled": Spec("Cloud", "Enabled cloud providers", _providers, "onedrive,gdrive",
+                              help="onedrive, gdrive or both. Users of a disabled provider are paused (no runs, a "
+                                   "banner on their page); nothing is deleted."),
+    "default_direction": Spec("Cloud", "Default sync direction for new users", _direction, "two_way",
+                              help="two_way (bisync), pull_copy (one-way, Copy only: never deletes on the NAS) or "
+                                   "pull_mirror (one-way, Mirror: NAS files missing from the cloud are moved to the "
+                                   "backup target). Existing users keep theirs; change them on the user's page."),
+    "pull_backup_target": Spec("Cloud", "Backup target for one-way runs", _backup_target, "backup_nas",
+                               help="backup_nas = the Sync-Archive share on the backup NAS (needs Mark's OK to "
+                                    "create). same_share = .springsync-archive on the user's own share. One-way runs "
+                                    "never run without a reachable, writable backup target."),
+    "backup_nas_host": Spec("Cloud", "Backup NAS address", lambda v: _host(v) if str(v).strip() else "", ""),
+    "backup_nas_share": Spec("Cloud", "Backup NAS share", _share, "Sync-Archive"),
+    "backup_nas_username": Spec("Cloud", "Backup NAS service login", _free, ""),
+    "backup_nas_password": Spec("Cloud", "Backup NAS service password", _free, "", secret=True),
+    "gdrive_users": Spec("Cloud", "Users whose cloud drive is Google Drive (UPNs, one per line)", _upns, "",
+                         help="Applied when the user first signs in (with Microsoft); afterwards change the provider "
+                              "on the user's page. Everyone else connects OneDrive."),
+    # Google (v0.9, SPEC §4.3). The client ID is in the bootstrap file, the secret is a credential file.
+    "google_allowed_domain": Spec("Google", "Allowed Google Workspace domain", _domain, "hotsprings.org",
+                                  help="Connect Google Drive needs hd == this domain, a verified email, and the email "
+                                       "equal to the user's Microsoft UPN (or an approved alias below)."),
+    "google_email_aliases": Spec("Google", "Approved Google email aliases (upn = google-email, one per line)",
+                                 _aliases, ""),
+    "google_gdocs_default": Spec("Google", "Google-native files for new users", _gdocs, "skip",
+                                 help="skip (default). export only applies to one-way users; two-way never exports."),
+    "google_export_formats": Spec("Google", "Export formats (one-way export only)", _formats, "docx,xlsx,pptx,svg"),
+    "google_client_secret_expires_on": Spec("Google", "Google client secret: rotate by (YYYY-MM-DD)",
+                                            _date_or_empty, ""),
     # Entra
     "group_users": Spec("Entra", "Users group object ID", _guid_or_empty, ""),
     "group_admins": Spec("Entra", "Admins group object ID", _guid_or_empty, ""),
@@ -176,6 +274,7 @@ SPECS: dict[str, Spec] = {
                                         help="Auto-read from the certificate when one is configured."),
 }
 BOOL_KEYS = {k for k, s in SPECS.items() if s.parse is _bool}
+LIST_KEYS = {"pilot_list", "gdrive_users", "google_email_aliases"}   # shown as textareas
 
 
 class Settings:
@@ -202,6 +301,20 @@ class Settings:
     def pilot_set(self) -> set[str]:
         return {x for x in self._v["pilot_list"].split("\n") if x}
 
+    def providers(self) -> set[str]:
+        return {x for x in self._v["providers_enabled"].split(",") if x}
+
+    def gdrive_user_set(self) -> set[str]:
+        return {x for x in self._v["gdrive_users"].split("\n") if x}
+
+    def google_aliases(self) -> dict[str, set[str]]:
+        out: dict[str, set[str]] = {}
+        for line in self._v["google_email_aliases"].split("\n"):
+            if "=" in line:
+                a, b = (x.strip() for x in line.split("="))
+                out.setdefault(a, set()).add(b)
+        return out
+
     def as_public_dict(self) -> dict[str, Any]:
         return {k: ("***" if SPECS[k].secret else v) for k, v in self._v.items()}
 
@@ -210,7 +323,8 @@ def _bootstrap_defaults(cfg: Config) -> dict[str, Any]:
     d = {k: s.default for k, s in SPECS.items()}
     d.update(nas_host=cfg.nas_host or d["nas_host"], nas_share=cfg.nas_share or d["nas_share"],
              group_users=cfg.group_users.lower(), group_admins=cfg.group_admins.lower(),
-             group_auditors=cfg.group_auditors.lower())
+             group_auditors=cfg.group_auditors.lower(),
+             google_allowed_domain=(getattr(cfg, "google_allowed_domain", "") or d["google_allowed_domain"]).lower())
     return d
 
 

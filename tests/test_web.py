@@ -110,9 +110,19 @@ def test_callback_state_must_match_cookie(app, entra):
 def test_reconnect_after_needs_reauth_resumes(app, entra, db, kr):
     login(app, entra)
     uid = db.users()[0]["id"]
+    db.update_profile(uid, onboarding_completed_at="2026-10-01T00:00:00+00:00")
     db.set_state(uid, D.NEEDS_REAUTH)
     login(app, entra)
     assert db.user(uid)["state"] == D.ACTIVE
+
+
+def test_reconnect_before_onboarding_finished_goes_back_to_onboarding(app, entra, db, kr):
+    # v0.9: never straight to active (that would skip the dry run + approval, e.g. after a provider switch)
+    login(app, entra)
+    uid = db.users()[0]["id"]
+    db.set_state(uid, D.NEEDS_REAUTH)
+    login(app, entra)
+    assert db.user(uid)["state"] == D.ONBOARDING
 
 
 def test_roles(app, entra):

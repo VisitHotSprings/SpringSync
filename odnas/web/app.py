@@ -23,7 +23,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from odnas import service_mode
+from odnas import cloud, service_mode
+from odnas.google import ClaimsError, GoogleClient, check_claims
 from odnas.notify import Alerter
 from odnas import __version__
 from odnas import db as D
@@ -44,7 +45,10 @@ ROLE_USER, ROLE_ADMIN, ROLE_AUDITOR = "user", "admin", "auditor"
 # Every POST /admin/users/{uid}/{action}. IT-admin role only (SpringSync-Admins); auditors get 403.
 ADMIN_USER_ACTIONS = ("pause", "resume", "approve-resync", "request-dryrun", "offboard",
                       "safety-restore", "safety-accept-deletes", "safety-refresh-delta",
-                      "service-mode-on", "service-mode-off")
+                      "service-mode-on", "service-mode-off",
+                      # v0.9 (SPEC §6.6, §4.4, §9.6, §9.7.2)
+                      "set-direction", "set-gdocs-mode", "set-provider", "approve-mirror-baseline",
+                      "recount-mirror-baseline", "safety-retry", "safety-switch-copy")
 
 CSP = ("default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; "
        "base-uri 'none'")
@@ -94,11 +98,16 @@ def local_time(v: str | None) -> str:
 
 
 def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
-               worker: WorkerClient | None = None) -> FastAPI:
+               worker: WorkerClient | None = None, google: GoogleClient | None = None) -> FastAPI:
     app = FastAPI(title=cfg.product_name, docs_url=None, redoc_url=None, openapi_url=None)
     templates = Jinja2Templates(directory=str(HERE / "templates"))
     templates.env.filters["local"] = local_time
-    templates.env.globals.update(product=cfg.product_name, version=__version__, labels=D.STATE_LABELS)
+    templates.env.globals.update(product=cfg.product_name, version=__version__, labels=D.STATE_LABELS,
+                                 state_label=D.state_label, provider_labels=cloud.PROVIDER_LABELS,
+                                 direction_labels=cloud.DIRECTION_LABELS)
+    if google is None:
+        from odnas.google import HttpGoogleClient
+        google = HttpGoogleClient(cfg)   # no network until a user actually connects Google Drive
     app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
     worker = worker or HttpWorkerClient(cfg, kr)
     cookie = f"{cfg.slug}_sid"
@@ -145,6 +154,8 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         return d
 
     def roles_for(sess: dict) -> set[str]:
+        """Roles come ONLY from the Microsoft Entra sign-in (SPEC v0.9 §4.4: app sign-in stays Microsoft for
+        everyone; Google is a data connection, never a session)."""
         s = settings()
         groups = set(sess.get("groups", []))
         roles = set()
@@ -238,6 +249,8 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         if not row:
             raise HTTPException(400, "Sign-in expired. Please start again.")
         flow = json.loads(kr.open(unpack(row["flow_ct"], row["key_id"]), Keyring.aad("auth_flows", state, "flow")))
+        if flow.get("purpose") == "google_connect":
+            raise HTTPException(400, "Sign-in session mismatch. Please start again.")
         res = entra.complete_auth(flow, q)
         if not res.ok:
             log.warning("sign-in failed: %s", res.error)
@@ -258,24 +271,40 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         data = {"oid": oid, "upn": upn, "name": c.get("name", upn), "groups": groups, "user_id": None}
         is_user = bool(s.group_users) and s.group_users in groups
         allowed = is_user and (not s.pilot_only or upn in s.pilot_set())
-        if allowed and res.refresh_token:
-            u = db.user_by_oid(oid)
-            drive = entra.get_drive(res.access_token)
+        u = db.user_by_oid(oid) if allowed else None
+        if allowed and (u is not None or res.refresh_token):
+            new = u is None
             if u is None:
-                uid = db.create_user(oid, upn, data["name"], local_name_from_upn(upn), D.ONBOARDING, True)
-                db.audit(oid, "user_connected", uid, {"upn": upn})
+                # v0.9: the admin chooses the provider (Settings gdrive_users for new users, or the user page)
+                prov = cloud.PROVIDER_GD if upn in s.gdrive_user_set() else cloud.PROVIDER_OD
+                uid = db.create_user(oid, upn, data["name"], local_name_from_upn(upn), D.ONBOARDING, True,
+                                     provider=prov, direction=s.default_direction, gdocs_mode=s.google_gdocs_default)
+                db.audit(oid, "user_connected", uid, {"upn": upn, "provider": prov,
+                                                      "direction": s.default_direction})
+                u = db.user_full(uid)
             else:
                 uid = u["id"]
+                u = db.user_full(uid)
+            onedrive = cloud.provider(u) == cloud.PROVIDER_OD
+            if onedrive and cloud.PROVIDER_OD not in s.providers():
+                db.audit(oid, "connect_denied_provider_disabled", uid, {"upn": upn, "provider": "onedrive"})
+            elif onedrive and res.refresh_token:
+                drive = entra.get_drive(res.access_token)
                 if u["state"] == D.REMOVED:
                     db.set_state(uid, D.ONBOARDING)
                     db.update_profile(uid, enabled=1, needs_resync=1, dryrun_ok_at=None, preflight_at=None)
                 elif u["state"] in (D.NEEDS_REAUTH, D.BLOCKED_BY_CA):
-                    db.set_state(uid, D.ACTIVE)  # resumes automatically on the next slot (SPEC §6.2)
-                    db.close_issues(uid, "needs_reauth", "blocked_by_ca")
-                db.audit(oid, "user_reconnected", uid, {"upn": upn})
-            db.put_ms_credential(kr, uid, res.refresh_token, drive["id"], drive.get("driveType", "business"))
-            if s.nas_option == "B" and not db.user(uid)["state"] == D.ACTIVE:
-                db.update_profile(uid, preflight_requested=1)
+                    reconnect_state(uid)
+                if not new:
+                    db.audit(oid, "user_reconnected", uid, {"upn": upn})
+                db.put_ms_credential(kr, uid, res.refresh_token, drive["id"], drive.get("driveType", "business"))
+                if s.nas_option == "B" and not db.user(uid)["state"] == D.ACTIVE:
+                    db.update_profile(uid, preflight_requested=1)
+            elif not onedrive and u["state"] == D.REMOVED:
+                db.set_state(uid, D.ONBOARDING)
+                db.update_profile(uid, enabled=1, needs_resync=1, dryrun_ok_at=None, preflight_at=None)
+            # Google users: the Microsoft refresh token is NOT stored (their cloud side is Google Drive);
+            # the session is still the Microsoft one. They connect Google Drive from /me.
             data["user_id"] = uid
         elif is_user and not allowed:
             db.audit(oid, "connect_denied_not_on_pilot", "", {"upn": upn})
@@ -283,6 +312,106 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         resp = RedirectResponse("/", 303)
         resp.delete_cookie(flow_cookie, path="/auth")
         new_session(resp, data)
+        return resp
+
+    def reconnect_state(uid: str) -> None:
+        """needs_reauth / blocked_by_ca -> resumes on the next slot (SPEC §6.2). v0.9: a user who had not
+        finished onboarding goes back to onboarding, never straight to active."""
+        u = db.user_full(uid)
+        db.set_state(uid, D.ACTIVE if u["onboarding_completed_at"] or u["last_success_at"] else D.ONBOARDING)
+        db.close_issues(uid, "needs_reauth", "blocked_by_ca")
+
+    # ---- Connect Google Drive (v0.9 §4.3, §4.4): a data connection for a signed-in user ---------------
+    def _google_ready(u) -> bool:
+        return (cfg.google_configured and cloud.provider(u) == cloud.PROVIDER_GD
+                and cloud.PROVIDER_GD in settings().providers())
+
+    def _google_expected(upn: str, s) -> set[str]:
+        return {upn.lower()} | s.google_aliases().get(upn.lower(), set())
+
+    @app.post("/me/google/connect")
+    async def google_connect(request: Request, sess: dict = Depends(require(ROLE_USER))):
+        await check_csrf(request, sess)
+        u = db.user_full(sess["user_id"])
+        if not _google_ready(u):
+            raise HTTPException(409, "Google Drive is not your connected cloud drive (ask IT).")
+        if u["state"] in (D.OFFBOARDING, D.REMOVED, D.PAUSED):
+            raise HTTPException(409, "Your sync is stopped by IT; connecting is not possible right now.")
+        if db.rate_limited(f"gconnect:{u['id']}"):
+            raise HTTPException(429, "Too many attempts. Try again in 15 minutes.")
+        s = settings()
+        flow = google.begin_auth(cfg.google_redirect_uri, s.google_allowed_domain, login_hint=u["upn"])
+        flow.update(purpose="google_connect", uid=u["id"], sid=sess["_sid"])
+        sealed = kr.seal(json.dumps(flow), Keyring.aad("auth_flows", flow["state"], "flow"))
+        db.q("DELETE FROM auth_flows WHERE created_at < ?", (D.iso(D.utcnow() - timedelta(minutes=10)),))
+        db.q("INSERT INTO auth_flows(state, flow_ct, key_id, created_at) VALUES (?,?,?,?)",
+             (flow["state"], pack(sealed), sealed.key_id, D.iso(D.utcnow())))
+        db.audit(sess["oid"], "google_connect_started", u["id"], {"upn": u["upn"]})
+        resp = RedirectResponse(flow["auth_uri"], 303)
+        resp.set_cookie(flow_cookie, flow["state"], max_age=600, secure=cfg.cookie_secure, httponly=True,
+                        samesite="lax", path="/auth")
+        return resp
+
+    @app.get(cfg.google_redirect_path)
+    def google_callback(request: Request):
+        sess = get_session(request)
+        if not sess or ROLE_USER not in roles_for(sess):
+            raise HTTPException(401, "Sign in with Microsoft first, then connect Google Drive.")
+        q = dict(request.query_params)
+        state = q.get("state", "")
+        if not state or not secrets.compare_digest(request.cookies.get(flow_cookie, ""), state):
+            raise HTTPException(400, "Connect session mismatch. Please start again.")
+        row = db.one("SELECT * FROM auth_flows WHERE state=? AND created_at > ?",
+                     (state, D.iso(D.utcnow() - timedelta(minutes=10))))
+        db.q("DELETE FROM auth_flows WHERE state=?", (state,))
+        if not row:
+            raise HTTPException(400, "Connect session expired. Please start again.")
+        flow = json.loads(kr.open(unpack(row["flow_ct"], row["key_id"]), Keyring.aad("auth_flows", state, "flow")))
+        uid = sess["user_id"]
+        if flow.get("purpose") != "google_connect" or flow.get("uid") != uid or flow.get("sid") != sess["_sid"]:
+            raise HTTPException(400, "Connect session mismatch. Please start again.")
+        u = db.user_full(uid)
+        if not _google_ready(u):
+            raise HTTPException(409, "Google Drive is not your connected cloud drive (ask IT).")
+        res = google.complete_auth(flow, q)
+        actor = sess["oid"]
+        if not res.ok:
+            log.warning("google connect failed: %s", res.error)
+            db.audit(actor, "google_connect_failed", uid, {"error": res.error[:60],
+                                                           "classification": res.classification})
+            raise HTTPException(403, "Google Drive was not connected. " + (
+                "A Google Workspace admin policy blocked it; IT has been told." if res.classification == "blocked_by_ca"
+                else "Google Drive access must be allowed on the consent screen." if res.error ==
+                "drive_scope_not_granted" else "Please try again."))
+        s = settings()
+        try:
+            sub, email = check_claims(res.id_claims, s.google_allowed_domain, _google_expected(u["upn"], s))
+        except ClaimsError as e:
+            c = res.id_claims
+            db.audit(actor, "google_connect_denied", uid,
+                     {"reason": e.reason, "hd": str(c.get("hd", ""))[:100], "email": str(c.get("email", ""))[:200]})
+            raise HTTPException(403, str(e)) from None
+        if not res.refresh_token:
+            raise HTTPException(403, "Google did not grant offline access. Please connect again.")
+        other = db.google_credential_by_sub(sub)
+        if other is not None and other["user_id"] != uid:
+            db.audit(actor, "google_connect_denied", uid, {"reason": "google_account_linked_to_other_user"})
+            raise HTTPException(409, "This Google account is already connected for another user. Ask IT.")
+        drive = google.get_drive(res.access_token)
+        if str(drive.get("email", "")).lower() != email:
+            db.audit(actor, "google_connect_denied", uid, {"reason": "drive_account_mismatch"})
+            raise HTTPException(403, "The Google Drive account does not match the Google sign-in.")
+        reconnect = db.google_credential(uid) is not None
+        db.put_google_credential(kr, uid, res.refresh_token, sub, email, res.scope or "")
+        if u["state"] in (D.NEEDS_REAUTH, D.BLOCKED_BY_CA):
+            reconnect_state(uid)
+        if s.nas_option == "B" and not db.user(uid)["state"] == D.ACTIVE:
+            db.update_profile(uid, preflight_requested=1)
+        db.audit(actor, "google_reconnected" if reconnect else "google_connected", uid,
+                 {"upn": u["upn"], "google_email": email, "alias": email != u["upn"].lower(),
+                  "scope": res.scope or ""})
+        resp = RedirectResponse("/me?msg=google_connected", 303)
+        resp.delete_cookie(flow_cookie, path="/auth")
         return resp
 
     @app.post("/logout")
@@ -305,7 +434,8 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         u = db.user_full(uid)
         s = settings()
         return render(request, "me.html", sess, u=u, runs=db.runs(uid, 10), issues=db.open_issues(uid),
-                      nas=db.nas_credential_meta(uid), ms=db.ms_credential(uid), nas_option=s.nas_option,
+                      nas=db.nas_credential_meta(uid), ms=db.cloud_credential(uid), nas_option=s.nas_option,
+                      cv=cloud.view(u, s), google_ready=_google_ready(u), gcred=db.google_credential(uid),
                       has_preflight=(Path(cfg.p_state) / "preflight" / f"{uid}.json").exists(),
                       msg=request.query_params.get("msg", ""))
 
@@ -355,16 +485,28 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         s = settings()
         alive, hb = worker_alive(db)
         tls = db.heartbeat("tls_expiry")
-        return {"users": db.users(include_removed=True), "issues": db.open_issues(), "worker_alive": alive,
+        users = db.users(include_removed=True)
+        return {"users": users, "cviews": {u["id"]: cloud.view(u, s) for u in users},
+                "issues": db.open_issues(), "worker_alive": alive,
                 "worker_hb": hb, "expiry": credential_expiry(cfg, s), "disk": disk_free_pct(cfg.p_state),
                 "tls": tls["detail"] if tls else "", "chain": db.heartbeat("audit_chain"), "s": s,
                 "nas_option": s.nas_option, "nas_pause": db.flag(D.NAS_GLOBAL_PAUSE), "sm": service_mode.view(db),
                 "sm_limits": (service_mode.MIN_HOURS, service_mode.MAX_HOURS, service_mode.DEFAULT_HOURS),
-                "sm_confirm": service_mode.CONFIRM_ALL}
+                "sm_confirm": service_mode.CONFIRM_ALL,
+                "google_app": db.flag("google_app_credential"),
+                "disabled_providers": sorted({cloud.provider(u) for u in users if u["state"] != D.REMOVED
+                                              and not cloud.provider_enabled(u, s)})}
 
     @adm.get("", response_class=HTMLResponse)
     def admin_home(request: Request, sess: dict = Depends(admin_dep)):
         return render(request, "admin.html", sess, **overview())
+
+    def _backup_test_status() -> dict | None:
+        hb = db.heartbeat("backup_test")
+        try:
+            return json.loads(hb["detail"]) if hb and hb["detail"] else None
+        except ValueError:
+            return None
 
     @adm.get("/settings", response_class=HTMLResponse)
     def admin_settings(request: Request, sess: dict = Depends(admin_dep)):
@@ -372,6 +514,8 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         set_flags = {k: bool(db.one("SELECT 1 FROM settings WHERE key=? AND is_secret=1", (k,)))
                      for k, sp in settings_store.SPECS.items() if sp.secret}
         return render(request, "admin_settings.html", sess, s=s, specs=settings_store.SPECS, set_flags=set_flags,
+                      list_keys=settings_store.LIST_KEYS, bool_keys=settings_store.BOOL_KEYS,
+                      google_configured=cfg.google_configured, backup_test=_backup_test_status(),
                       nas_pause=db.flag(D.NAS_GLOBAL_PAUSE), svc_test=svc_test_status(db),
                       msg=request.query_params.get("msg", ""), err=request.query_params.get("err", ""))
 
@@ -385,6 +529,14 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
             from urllib.parse import quote
             return RedirectResponse("/admin/settings?err=" + quote(str(e)[:400]), 303)
         return RedirectResponse(f"/admin/settings?msg=saved+{len(changed)}+change(s)", 303)
+
+    @adm.post("/settings/backup-test")
+    async def admin_backup_test(request: Request, sess: dict = Depends(admin_dep)):
+        """v0.9 §6.4: the worker mounts the backup target and writes/removes a marker on its next tick."""
+        await check_csrf(request, sess)
+        db.set_flag("backup_test_requested", "admin test", by=sess["upn"])
+        db.audit(sess["oid"], "backup_target_test_requested", "", {"target": settings().pull_backup_target})
+        return RedirectResponse("/admin/settings?msg=Backup+target+test+requested+(result+within+a+minute)", 303)
 
     @adm.post("/settings/nas-test")
     async def admin_nas_test(request: Request, sess: dict = Depends(admin_dep)):
@@ -401,8 +553,9 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         if not u:
             raise HTTPException(404)
         return render(request, "user_detail.html", sess, u=u, runs=db.runs(uid, 30), issues=db.open_issues(uid),
-                      nas=db.nas_credential_meta(uid), ms=db.ms_credential(uid), admin=True,
-                      safety=_safety_view(u, with_delta=True), **_sm_user(u))
+                      nas=db.nas_credential_meta(uid), ms=db.cloud_credential(uid), admin=True,
+                      safety=_safety_view(u, with_delta=True), cv=cloud.view(u, settings()),
+                      providers=settings().providers(), **_sm_user(u))
 
     def _sm_user(u) -> dict:
         w = service_mode.user_window(u)
@@ -480,7 +633,9 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
              "delete_count": None, "del_p1": None, "del_p2": None, "has_list": False,
              "onboarding": not u["onboarding_completed_at"],
              "no_delta": json.loads(u["safety_abort_json"] or "{}").get("during") == "dryrun",
-             "tonight_held_at": u["tonight_held_at"]}
+             "tonight_held_at": u["tonight_held_at"],
+             "one_way": cloud.is_pull(u),
+             "cloud": cloud.CLOUD_SIDE[cloud.provider(u)]}
         if with_delta and u["safety_delta_at"]:
             d = _delta_doc(u["id"])
             if d is not None:
@@ -493,7 +648,8 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         """The safety-abort file list. IT admins only; every view is audited (SPEC v0.3 §14.13: until
         Walter signs off on admins seeing file names)."""
         u = db.user_full(uid)
-        if not u or not u["safety_delta_at"]:
+        # v0.9: also the Mirror baseline list (what Mirror would move to the backup target), same rules
+        if not u or not (u["safety_delta_at"] or u["mirror_baseline_counted_at"]):
             raise HTTPException(404)
         d = _delta_doc(uid)
         if d is None:
@@ -501,10 +657,14 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         entries = d.get("items", [])
         db.audit(sess["oid"], "safety_delta_viewed", uid,
                  {"viewer_upn": sess["upn"], "user_upn": u["upn"], "entries": len(entries),
-                  "delta_at": u["safety_delta_at"]})
+                  "delta_at": u["safety_delta_at"] or u["mirror_baseline_counted_at"],
+                  "list": "safety" if u["safety_delta_at"] else "mirror_baseline"})
         p1, p2 = delete_counts(d)
+        summary = u["safety_delta_summary"] or (
+            f"Mirror baseline: {u['mirror_baseline_count']} of {u['mirror_baseline_total']} NAS file(s) would be "
+            "moved to the backup target")
         return render(request, "safety_delta.html", sess, u=u, entries=entries[:500],
-                      truncated=bool(d.get("truncated")) or len(entries) > 500, summary=u["safety_delta_summary"],
+                      truncated=bool(d.get("truncated")) or len(entries) > 500, summary=summary,
                       del_p1=p1, del_p2=p2)
 
     @adm.post("/users/{uid}/{action}")
@@ -519,6 +679,12 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         details: dict = {"upn": u["upn"]}
         if action.startswith("safety-") and u["state"] != D.SAFETY_ABORT:
             raise HTTPException(409, "This user is not stopped by a safety abort.")
+        if action in ("set-direction", "set-gdocs-mode", "set-provider", "approve-mirror-baseline",
+                      "recount-mirror-baseline", "safety-retry", "safety-switch-copy"):
+            return _cloud_action(uid, action, u, form, sess)
+        if action == "safety-restore" and cloud.is_pull(u):
+            raise HTTPException(409, "One-way users have no Restore (the cloud is never written). Use Accept "
+                                     "deletes, Switch to Copy only, or Retry.")
         if action in ("service-mode-on", "service-mode-off"):
             alerter = Alerter(db)
             if action == "service-mode-off":
@@ -544,9 +710,23 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
                 raise HTTPException(409, "Safety abort: use Restore or Accept deletes.")
             if not u["dryrun_ok_at"] and u["state"] == D.ONBOARDING:
                 raise HTTPException(409, "Run and review the dry-run first.")
+            if cloud.is_pull(u) and u["state"] not in (D.ONBOARDING, D.CRITICAL):
+                raise HTTPException(409, "One-way users don't resync; switch to two-way for a new bisync baseline.")
             if not (u["needs_resync"] or u["state"] in (D.ONBOARDING, D.CRITICAL)):
                 raise HTTPException(409, "This user does not need a resync.")
-            db.update_profile(uid, resync_approved_by=actor, resync_approved_at=D.iso(D.utcnow()))
+            prof = dict(resync_approved_by=actor, resync_approved_at=D.iso(D.utcnow()))
+            if cloud.direction(u) == cloud.PULL_MIRROR and u["state"] == D.ONBOARDING:
+                # SPEC v0.9 §6.1 step 9: the Mirror baseline count shown with the approval is approved with it
+                try:
+                    shown = int(str(form.get("baseline_count", "")))
+                except ValueError:
+                    raise HTTPException(400, "Missing the Mirror baseline count.") from None
+                if u["mirror_baseline_count"] is None or shown != u["mirror_baseline_count"]:
+                    raise HTTPException(409, "The Mirror baseline count changed; reload and review.")
+                prof.update(mirror_baseline_approved_by=sess["upn"], mirror_baseline_approved_at=prof["resync_approved_at"],
+                            mirror_baseline_approved_count=shown, mirror_baseline_state=cloud.BASELINE_PENDING)
+                details.update(mirror_baseline_moves=shown, total=u["mirror_baseline_total"])
+            db.update_profile(uid, **prof)
             db.close_issues(uid, "approval_needed")
         elif action == "request-dryrun":
             db.update_profile(uid, dryrun_ok_at=None, dryrun_summary=None, last_run_at=None)
@@ -617,6 +797,68 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         db.audit(actor, f"admin_{action.replace('-', '_')}", uid, details)
         return RedirectResponse(f"/admin/users/{uid}", 303)
 
+    def _job_running(uid: str) -> bool:
+        return db.one("SELECT 1 FROM sync_runs WHERE user_id=? AND ended_at IS NULL AND started_at > ?",
+                      (uid, D.iso(D.utcnow() - timedelta(hours=6)))) is not None
+
+    def _cloud_action(uid: str, action: str, u, form: dict, sess: dict):
+        """v0.9 direction / provider / Google-files / Mirror-baseline / one-way safety actions. Admin only;
+        every change is audited inside cloud.* or here."""
+        if u["state"] in (D.REMOVED, D.OFFBOARDING):
+            raise HTTPException(409, "This user is leaving or removed.")
+        actor, upn = sess["oid"], sess["upn"]
+        s = settings()
+        try:
+            if action == "set-direction":
+                to = str(form.get("direction", ""))
+                mf = (form.get("mirror_first") == "on") if form.get("mf_shown") else None
+                cloud.request_direction(db, uid, to, str(form.get("reason", "")), actor, upn, mirror_first=mf)
+            elif action == "set-gdocs-mode":
+                cloud.set_gdocs_mode(db, uid, str(form.get("gdocs_mode", "")), actor, upn)
+            elif action == "approve-mirror-baseline":
+                if form.get("confirm") != u["upn"]:
+                    raise HTTPException(400, "Type the user's UPN to confirm the Mirror baseline.")
+                try:
+                    n = int(str(form.get("count", "")))
+                except ValueError:
+                    raise HTTPException(400, "Missing the count.") from None
+                cloud.approve_baseline(db, uid, n, actor, upn)
+                db.close_issues(uid, "mirror_baseline_approval")
+            elif action == "recount-mirror-baseline":
+                cloud.recount_baseline(db, uid, actor, upn)
+            elif action in ("safety-retry", "safety-switch-copy"):
+                if u["state"] != D.SAFETY_ABORT or not cloud.is_pull(u):
+                    raise HTTPException(409, "Only for a one-way user stopped by a safety abort.")
+                reason = str(form.get("reason", "")) or ("retry after review" if action == "safety-retry" else "")
+                if action == "safety-switch-copy":
+                    cloud.request_direction(db, uid, cloud.PULL_COPY, reason or "safety abort: switch to Copy only",
+                                            actor, upn)
+                else:
+                    from odnas.runner import _SAFETY_CLEAR
+                    if u["safety_action"]:
+                        raise HTTPException(409, f"Already approved: {u['safety_action']}.")
+                    db.update_profile(uid, **_SAFETY_CLEAR, next_run_at=None)
+                    db.set_state(uid, D.ACTIVE)
+                    db.close_issues(uid, "safety_abort")
+                    db.audit(actor, "admin_safety_retry", uid, {"upn": u["upn"], "reason": reason,
+                                                                "abort": json.loads(u["safety_abort_json"] or "{}")})
+            else:   # set-provider
+                to = str(form.get("provider", ""))
+                if to not in cloud.PROVIDERS or to == cloud.provider(u):
+                    raise HTTPException(400, "Choose the other provider.")
+                if to not in s.providers():
+                    raise HTTPException(409, "That provider is not enabled in Settings.")
+                if form.get("confirm") != u["upn"]:
+                    raise HTTPException(400, "Type the user's UPN to confirm the provider change.")
+                if _job_running(uid):
+                    raise HTTPException(409, "A sync is running for this user. Pause the user, wait for it to "
+                                             "finish, then change the provider.")
+                cloud.set_provider(db, cfg, Alerter(db), uid, to, str(form.get("reason", "")), actor, upn,
+                                   rec=[x.strip() for x in (s.alert_recipients or "").split(",") if x.strip()])
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+        return RedirectResponse(f"/admin/users/{uid}", 303)
+
     app.include_router(adm)
 
     # ---- auditor area: GET ONLY ---------------------------------------------
@@ -633,8 +875,9 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
         if not u:
             raise HTTPException(404)
         return render(request, "user_detail.html", sess, u=u, runs=db.runs(uid, 30), issues=db.open_issues(uid),
-                      nas=db.nas_credential_meta(uid), ms=db.ms_credential(uid), admin=False,
-                      safety=_safety_view(u, with_delta=False), **_sm_user(u))
+                      nas=db.nas_credential_meta(uid), ms=db.cloud_credential(uid), admin=False,
+                      safety=_safety_view(u, with_delta=False), cv=cloud.view(u, settings()),
+                      providers=settings().providers(), **_sm_user(u))
 
     def _audit_filter(request: Request) -> list:
         qp = request.query_params
@@ -668,7 +911,8 @@ def build_from_env() -> FastAPI:
     cfg = load_config()
     db = D.DB(cfg.p_db)
     kr = Keyring.from_config(cfg)
-    return create_app(cfg, db, kr, MsalEntraClient(cfg))
+    from odnas.google import HttpGoogleClient
+    return create_app(cfg, db, kr, MsalEntraClient(cfg), google=HttpGoogleClient(cfg))
 
 
 def iter_routes(app: FastAPI):

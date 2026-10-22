@@ -8,7 +8,13 @@ from odnas.db import DB, pack, unpack
 
 
 def rekey_all(db: DB, kr: Keyring) -> dict[str, int]:
-    n = {"ms_credentials": 0, "nas_credentials": 0, "settings": 0}
+    n = {"ms_credentials": 0, "google_credentials": 0, "nas_credentials": 0, "settings": 0}
+    for r in db.all("SELECT * FROM google_credentials WHERE key_id != ?", (kr.primary_id,)):   # v0.9
+        s = kr.reseal(unpack(r["refresh_token_ct"], r["key_id"]),
+                      Keyring.aad("google_credentials", r["user_id"], "refresh_token"))
+        db.q("UPDATE google_credentials SET refresh_token_ct=?, key_id=? WHERE user_id=?",
+             (pack(s), s.key_id, r["user_id"]))
+        n["google_credentials"] += 1
     for r in db.all("SELECT * FROM ms_credentials WHERE key_id != ?", (kr.primary_id,)):
         aad = Keyring.aad("ms_credentials", r["user_id"], "refresh_token")
         s = kr.reseal(unpack(r["refresh_token_ct"], r["key_id"]), aad)

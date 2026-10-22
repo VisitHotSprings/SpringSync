@@ -1,14 +1,20 @@
 {% extends "base.html" %}{% block body %}
 <h1>{{ u.upn }}</h1>
 <table>
-<tr><th>State</th><td>{{ labels[u.state] }} {% if u.pause_reason %}({{ u.pause_reason }}){% endif %}</td></tr>
+<tr><th>State</th><td>{{ state_label(u.state, cv.provider) }} {% if u.pause_reason %}({{ u.pause_reason }}){% endif %}</td></tr>
+<tr><th>Cloud provider</th><td>{{ cv.provider_label }}{% if not cv.provider_enabled %} <span class="badge warn">provider disabled in Settings: not syncing</span>{% endif %}</td></tr>
+<tr><th>Sync direction</th><td>{{ cv.direction_label }}{% if cv.changed_at %} (since {{ cv.changed_at|local }}, by {{ cv.changed_by }}: {{ cv.reason }}){% endif %}{% if cv.requested %} <span class="badge warn">switch to {{ cv.requested_label }}{{ ' (Mirror first)' if cv.requested_mirror_first else '' }} pending</span>{% endif %}{% if cv.then %} <span class="badge warn">Mirror pass, then two-way</span>{% endif %}{% if cv.two_way_baseline_pending %} <span class="badge">two-way baseline not built yet</span>{% endif %}
+{% if cv.warning %}<br><small>{{ cv.warning }}</small>{% endif %}</td></tr>
+{% if cv.provider == 'gdrive' %}<tr><th>Google Docs/Sheets/Slides</th><td>{{ 'exported as Office files (read-only copies on the NAS)' if cv.exporting else 'skipped' }}{% if cv.gdocs_mode == 'export' and not cv.exporting %} (export set, but only applies to one-way){% endif %}</td></tr>{% endif %}
+{% if cv.direction == 'pull_mirror' %}<tr><th>Mirror baseline</th><td>{% if not cv.baseline_needed %}ok{% elif cv.baseline_count is none %}not counted yet (Copy only runs until it is approved){% else %}{{ cv.baseline_count }} of {{ cv.baseline_total }} NAS file(s) would be moved to the backup target (counted {{ cv.baseline_counted_at|local }}){% if cv.baseline_approved_by %}; approved {{ cv.baseline_approved_count }} by {{ cv.baseline_approved_by }}{% endif %}{% endif %}{% if cv.baseline_state %} <span class="badge">{{ cv.baseline_state }}</span>{% endif %}</td></tr>{% endif %}
+<tr><th>Service-mode effect</th><td>{{ cv.service_mode_effect }}</td></tr>
 <tr><th>Needs resync</th><td>{{ 'yes' if u.needs_resync else 'no' }}{% if u.resync_approved_by %}, approved by {{ u.resync_approved_by }} {{ u.resync_approved_at|local }}{% endif %}</td></tr>
 <tr><th>Dry run</th><td>{{ u.dryrun_summary or '-' }} {{ u.dryrun_ok_at|local if u.dryrun_ok_at else '' }}</td></tr>
 <tr><th>Preflight</th><td>{{ u.preflight_summary or '-' }}</td></tr>
-<tr><th>Microsoft credential</th><td>{% if ms %}stored; last refresh {{ ms.last_refresh_at|local }}{% if ms.last_refresh_error %}; last error {{ ms.last_refresh_error }}{% endif %}{% else %}none{% endif %}</td></tr>
+<tr><th>{{ cv.cloud_side }} credential</th><td>{% if ms %}stored; last refresh {{ ms.last_refresh_at|local }}{% if ms.last_refresh_error %}; last error {{ ms.last_refresh_error }}{% endif %}{% else %}none{% endif %}</td></tr>
 <tr><th>NAS credential</th><td>{% if nas %}stored (option {{ nas.provider }}); verified {{ nas.verified_at|local }}; failures {{ nas.failure_count }}{% else %}none{% endif %}</td></tr>
 <tr><th>Last success / check</th><td>{{ u.last_success_at|local }} / {{ u.last_check_at|local }}</td></tr>
-<tr><th>Service mode</th><td>{% if sm_scope == 'all' %}ON (all users) until {{ sm_global.ends_at|local }}: {{ sm_global.reason }}{% if sm_user %}; also selected until {{ sm_user.ends_at|local }}{% endif %}{% elif sm_user and sm_scope %}ON until {{ sm_user.ends_at|local }}, by {{ sm_user.set_by }}: {{ sm_user.reason }}{% elif sm_global or sm_user %}switched on, but not applied (onboarding incomplete){% else %}off{% endif %}{% for d in sm_deletes %}. Deletes in this window: OneDrive {{ d.deleted_onedrive }} / NAS {{ d.deleted_nas }}{% endfor %}</td></tr>
+<tr><th>Service mode</th><td>{% if sm_scope == 'all' %}ON (all users) until {{ sm_global.ends_at|local }}: {{ sm_global.reason }}{% if sm_user %}; also selected until {{ sm_user.ends_at|local }}{% endif %}{% elif sm_user and sm_scope %}ON until {{ sm_user.ends_at|local }}, by {{ sm_user.set_by }}: {{ sm_user.reason }}{% elif sm_global or sm_user %}switched on, but not applied (onboarding incomplete){% else %}off{% endif %}{% for d in sm_deletes %}. Deletes in this window: {{ cv.cloud_side }} {{ d.deleted_onedrive }} / NAS {{ d.deleted_nas }}{% endfor %}</td></tr>
 <tr><th>Schedule</th><td>offset {{ u.slot_offset_min }} min, backoff x{{ u.backoff_factor }}, next {{ u.next_run_at|local }}</td></tr>
 </table>
 {% if admin and sm_eligible %}
@@ -21,8 +27,8 @@
 {% if safety %}
 <h2>Safety abort</h2>
 <table>
-<tr><th>Blocked</th><td>{{ safety.at|local }}: {% if safety.abort.check == 'max_delete' %}too many deletes (limit {{ safety.abort.pct }}%){% for side, c in safety.abort_sides|dictsort %}; {{ side }} ({{ 'OneDrive' if side == 'Path1' else 'NAS' }}) {{ c.deletes }} of {{ c.total }}{% else %}; {{ safety.abort.side }} {{ safety.abort.deletes }} of {{ safety.abort.total }}{% endfor %}{% else %}all files were changed on {{ 'OneDrive' if safety.abort.side == 'Path1' else 'the NAS' }}{% endif %}</td></tr>
-{% if safety.del_p1 is not none %}<tr><th>Deletions (dry run)</th><td>Path1 (OneDrive): {{ safety.del_p1 }} &middot; Path2 (NAS): {{ safety.del_p2 }}</td></tr>{% endif %}
+<tr><th>Blocked</th><td>{{ safety.at|local }}: {% if safety.abort.check == 'max_delete' %}too many deletes (limit {{ safety.abort.pct }}%){% for side, c in safety.abort_sides|dictsort %}; {{ side }} ({{ safety.cloud if side == 'Path1' else 'NAS' }}) {{ c.deletes }} of {{ c.total }}{% else %}; {{ safety.abort.side }} {{ safety.abort.deletes }} of {{ safety.abort.total }}{% endfor %}{% elif safety.abort.check == 'empty_source' %}the {{ safety.cloud }} listing is empty while the NAS has {{ safety.abort.total }} file(s) (mirror deletes would empty the NAS){% else %}all files were changed on {{ safety.cloud if safety.abort.side == 'Path1' else 'the NAS' }}{% endif %}{% if safety.one_way %} (one-way pull){% endif %}</td></tr>
+{% if safety.del_p1 is not none %}<tr><th>Deletions (dry run)</th><td>Path1 ({{ safety.cloud }}{{ ', deleted in the cloud, removed from the NAS' if safety.one_way else '' }}): {{ safety.del_p1 }} &middot; Path2 (NAS): {{ safety.del_p2 }}</td></tr>{% endif %}
 <tr><th>Dry-run delta</th><td>{% if safety.delta_pending %}being prepared (read-only dry run){% else %}{{ safety.delta_summary or '-' }} {{ safety.delta_at|local if safety.delta_at else '' }}{% endif %}</td></tr>
 <tr><th>Decision</th><td>{% if safety.action == 'restore' %}Restore ({{ 'tonight, in the resync window' if safety.restore_when == 'tonight' else 'next slot' }}) approved by {{ safety.action_by }} {{ safety.action_at|local }}{% if safety.requeued %}; automatically re-queued for tonight after hitting the run-time limit{% endif %}{% elif safety.action == 'accept_deletes' %}Accept deletes (Path1 {{ safety.approved_p1 }}, Path2 {{ safety.approved_p2 }}) approved by {{ safety.action_by }} {{ safety.action_at|local }}; expires {{ safety.expires_at|local }}{% else %}waiting for IT{% endif %}</td></tr>
 <tr><th>Accept-deletes approval</th><td>{{ safety.accept_state or '-' }}{% if safety.accept_state_at and safety.accept_state != 'pending' %} ({{ safety.accept_state_at|local }}){% endif %}</td></tr>
@@ -31,39 +37,70 @@
 {% if safety.restore_timeouts %}<tr><th>Restore timeouts</th><td>{{ safety.restore_timeouts }}</td></tr>{% endif %}
 </table>
 {% if admin %}
+{% if safety.one_way %}
+<p>One-way pull: nothing is ever written to {{ safety.cloud }}, so there is no Restore. <strong>Accept deletes</strong> runs the Mirror once after a fresh count confirms the approved number; removed NAS files are moved to the backup target. <strong>Switch to Copy only</strong> keeps every NAS file (no deletes from then on). <strong>Retry</strong> clears the stop; the next run counts again and stops again if the deletes are still over the limit.</p>
+{% else %}
 <p><strong>Restore</strong> runs one <code>--resync --resync-mode newer</code> (next slot: normal run-time limit, re-queued once for tonight if it runs out; tonight: until the window closes): files deleted on one side are copied back from the other.
-<strong>Accept deletes</strong> runs bisync once with <code>--force</code> (normal run-time limit) after a fresh dry run confirms the approved delete count; the approval expires after 24 h. Deletions stay recoverable from the OneDrive recycle bin, the archive folder and NAS snapshots.</p>
+<strong>Accept deletes</strong> runs bisync once with <code>--force</code> (normal run-time limit) after a fresh dry run confirms the approved delete count; the approval expires after 24 h. Deletions stay recoverable from the {{ safety.cloud }} recycle bin, the archive folder and NAS snapshots.</p>{% endif %}
 {% if safety.has_list %}<p><a href="/admin/users/{{ u.id }}/safety-delta">View the file list</a> (IT admins only; each view is audited).</p>{% endif %}
 {% if not safety.action and ((safety.delta_at and not safety.delta_pending) or safety.no_delta) %}
 <form class="inline" method="post" action="/admin/users/{{ u.id }}/safety-restore"><input type="hidden" name="csrf" value="{{ csrf }}">
-{% if safety.onboarding %}<button>Restore (re-run the onboarding resync, in the resync window)</button></form>
+{% if safety.one_way %}</form>
+<form class="inline" method="post" action="/admin/users/{{ u.id }}/safety-switch-copy"><input type="hidden" name="csrf" value="{{ csrf }}"><label>Reason <input type="text" name="reason" required minlength="3" maxlength="300"></label><button>Switch to Copy only</button></form>
+<form class="inline" method="post" action="/admin/users/{{ u.id }}/safety-retry"><input type="hidden" name="csrf" value="{{ csrf }}"><label>Reason <input type="text" name="reason" required minlength="3" maxlength="300"></label><button>Retry</button></form>
+{% elif safety.onboarding %}<button>Restore (re-run the onboarding resync, in the resync window)</button></form>
 {% else %}<label><input type="radio" name="when" value="next_slot" checked> next slot</label>
 <label><input type="radio" name="when" value="tonight"> run tonight (resync window, needs 30 min left)</label>
 <button>Restore (approve resync)</button></form>{% endif %}
 {% if safety.delete_count is not none %}
 <form class="inline" method="post" action="/admin/users/{{ u.id }}/safety-accept-deletes"><input type="hidden" name="csrf" value="{{ csrf }}">
 <input type="hidden" name="approved_deletes_path1" value="{{ safety.del_p1 }}"><input type="hidden" name="approved_deletes_path2" value="{{ safety.del_p2 }}">
-<label>Type the UPN to confirm <input type="text" name="confirm"></label><button>Accept deletes: Path1 {{ safety.del_p1 }}, Path2 {{ safety.del_p2 }} (one --force run)</button></form>
+<label>Type the UPN to confirm <input type="text" name="confirm"></label><button>{% if safety.one_way %}Accept deletes: move {{ safety.del_p2 }} NAS file(s) to the backup target (one Mirror run){% else %}Accept deletes: Path1 {{ safety.del_p1 }}, Path2 {{ safety.del_p2 }} (one --force run){% endif %}</button></form>
 {% endif %}
 {% endif %}
 {% if not safety.action and not safety.no_delta %}<form class="inline" method="post" action="/admin/users/{{ u.id }}/safety-refresh-delta"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Refresh dry-run delta</button></form>{% endif %}
 {% endif %}
 {% endif %}
 {% if admin %}
+<h2>Sync direction</h2>
+<form method="post" action="/admin/users/{{ u.id }}/set-direction"><input type="hidden" name="csrf" value="{{ csrf }}">
+<label>Direction <select name="direction">{% for d, label in direction_labels|dictsort %}<option value="{{ d }}"{{ ' selected' if d == cv.direction }}>{{ label }}</option>{% endfor %}</select></label>
+<label>Reason <input type="text" name="reason" required minlength="3" maxlength="300"></label>
+{% if cv.direction == 'pull_copy' %}<label><input type="checkbox" name="mirror_first" checked> to two-way: run a Mirror pass first (NAS-only files go to the backup target instead of being uploaded)</label><input type="hidden" name="mf_shown" value="1">{% endif %}
+<button>Switch direction</button></form>
+<p><small>Applied by the worker between runs, never during one. Two-way &rarr; one-way: the bisync listings are set aside and the next slot pulls. One-way &rarr; two-way: the user goes back to onboarding (preflight, dry run, "Approve initial sync"); without a Mirror pass, NAS-only files are uploaded to {{ cv.cloud_side }}. Choosing the current direction withdraws a pending switch.</small><br><small>{{ direction_labels['pull_mirror'] }}: {{ cv.warning if cv.direction == 'pull_mirror' else '' }}{% if cv.direction != 'pull_mirror' %}Mirror makes the NAS folder match the cloud: NAS-only files are moved to the backup NAS. The first Mirror run waits for an approved baseline count.{% endif %}</small></p>
+{% if cv.direction == 'pull_mirror' and cv.baseline_needed %}
+{% if cv.baseline_count is not none and not cv.baseline_approved_by and u.state == 'active' %}
+<form class="inline" method="post" action="/admin/users/{{ u.id }}/approve-mirror-baseline"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="count" value="{{ cv.baseline_count }}">
+<label>Type the UPN to confirm <input type="text" name="confirm"></label><button>Approve Mirror baseline: move {{ cv.baseline_count }} NAS file(s) to the backup target</button></form>
+<a href="/admin/users/{{ u.id }}/safety-delta">View the file list</a>{% endif %}
+<form class="inline" method="post" action="/admin/users/{{ u.id }}/recount-mirror-baseline"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Count again</button></form>
+{% endif %}
+{% if cv.provider == 'gdrive' %}
+<form class="inline" method="post" action="/admin/users/{{ u.id }}/set-gdocs-mode"><input type="hidden" name="csrf" value="{{ csrf }}">
+<label>Google Docs/Sheets/Slides <select name="gdocs_mode"><option value="skip"{{ ' selected' if cv.gdocs_mode == 'skip' }}>skip</option><option value="export"{{ ' selected' if cv.gdocs_mode == 'export' }}{{ ' disabled' if not cv.is_pull }}>export as Office files (one-way only)</option></select></label>
+<button>Set</button></form>{% endif %}
+<h2>Cloud provider</h2>
+{% set other = 'onedrive' if cv.provider == 'gdrive' else 'gdrive' %}{% if other in providers %}
+<form method="post" action="/admin/users/{{ u.id }}/set-provider"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="provider" value="{{ other }}">
+<label>Reason <input type="text" name="reason" required minlength="3" maxlength="300"></label>
+<label>Type the UPN to confirm <input type="text" name="confirm"></label>
+<button>Switch cloud provider to {{ provider_labels[other] }}</button></form>
+<p><small>Erases the stored {{ cv.cloud_side }} credential and the sync listings; nothing is copied between clouds. The user {{ 'connects Google Drive from their status page' if other == 'gdrive' else 'signs in with Microsoft again' }} and onboards again (preflight, dry run, approval). NAS files and the NAS login are kept. Not possible while a sync is running.</small></p>{% else %}<p><small>{{ provider_labels[other] }} is not enabled in Settings.</small></p>{% endif %}
 <h2>Actions</h2>
 {% for a, label in [('pause','Pause'),('resume','Resume'),('request-dryrun','Run dry-run again'),('approve-resync','Approve initial sync / resync')] %}
-<form class="inline" method="post" action="/admin/users/{{ u.id }}/{{ a }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button>{{ label }}</button></form>
+<form class="inline" method="post" action="/admin/users/{{ u.id }}/{{ a }}"><input type="hidden" name="csrf" value="{{ csrf }}">{% if a == 'approve-resync' and cv.direction == 'pull_mirror' and u.state == 'onboarding' and cv.baseline_count is not none %}<input type="hidden" name="baseline_count" value="{{ cv.baseline_count }}"><button>Approve initial sync (Mirror: moves {{ cv.baseline_count }} of {{ cv.baseline_total }} NAS file(s) to the backup target)</button>{% else %}<button>{{ label }}</button>{% endif %}</form>
 {% endfor %}
 <fieldset><legend>Offboard</legend>
 <form method="post" action="/admin/users/{{ u.id }}/offboard"><input type="hidden" name="csrf" value="{{ csrf }}">
 <label><input type="checkbox" name="final_sync"> run one final sync first</label>
 <label>Type the UPN to confirm <input type="text" name="confirm"></label>
 <button>Offboard (erase stored credentials)</button></form>
-<small>Files on the NAS and in OneDrive are not touched.</small></fieldset>
+<small>Files on the NAS and in {{ cv.cloud_side }} are not touched.</small></fieldset>
 {% endif %}
 <h2>Open issues</h2><ul>{% for i in issues %}<li>{{ i.type }} ({{ i.severity }}): {{ i.summary }}</li>{% else %}<li>none</li>{% endfor %}</ul>
 <h2>Runs</h2>
-<table><tr><th>Started</th><th>Ended</th><th>Kind</th><th>Exit</th><th>Result</th><th>Copied</th><th>Deleted</th><th>Bytes</th><th>Conflicts</th><th>Errors</th><th>Detail</th></tr>
-{% for r in runs %}<tr><td>{{ r.started_at|local }}</td><td>{{ r.ended_at|local }}</td><td>{{ r.kind }}{% if r.service_mode %} <span class="badge warn">service mode ({{ r.service_mode }})</span>{% endif %}</td><td>{{ r.exit_code }}</td><td>{{ r.result }}</td><td>{{ r.files_copied }}</td><td>{{ r.files_deleted }}</td><td>{{ r.bytes }}</td><td>{{ r.conflicts }}</td><td>{{ r.errors_count }}</td><td>{{ r.detail }}</td></tr>{% endfor %}
+<table><tr><th>Started</th><th>Ended</th><th>Kind</th><th>Exit</th><th>Result</th><th>Copied</th><th>Deleted / moved</th><th>Bytes</th><th>Conflicts</th><th>Errors</th><th>Detail</th></tr>
+{% for r in runs %}<tr><td>{{ r.started_at|local }}</td><td>{{ r.ended_at|local }}</td><td>{{ r.kind }}{% if r.op %} <small>({{ r.op }})</small>{% endif %}{% if r.provider == 'gdrive' %} <small>Google</small>{% endif %}{% if r.service_mode %} <span class="badge warn">service mode ({{ r.service_mode }})</span>{% endif %}</td><td>{{ r.exit_code }}</td><td>{{ r.result }}</td><td>{{ r.files_copied }}</td><td>{{ r.files_deleted }}</td><td>{{ r.bytes }}</td><td>{{ r.conflicts }}</td><td>{{ r.errors_count }}</td><td>{{ r.detail }}</td></tr>{% endfor %}
 </table>
 {% endblock %}

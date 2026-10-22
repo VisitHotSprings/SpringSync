@@ -103,16 +103,34 @@ class SafetyAbort:
     # Note (verified on v1.75.2): rclone stops at the FIRST side that trips, so usually only one side is
     # logged even when both exceed the limit; the delta dry-run gives the real per-side counts.
     per_side: dict = field(default_factory=dict)
+    # v0.9: the direction ("two_way" bisync, "pull_mirror"); cloud = the user's cloud label ("OneDrive",
+    # "Google Drive"). Mirror checks: max_delete (counting dry-run), empty_source, max_delete_backstop.
+    mode: str = "two_way"
+    cloud: str = ""
+
+    def _label(self, side: str) -> str:
+        if side == "Path1" and self.cloud:
+            return self.cloud
+        return SIDE_LABEL.get(side, side)
 
     def summary(self) -> str:
         if self.check == "max_delete":
-            parts = [f"{SIDE_LABEL.get(k, k)} {v['deletes']} of {v['total']}" for k, v in sorted(self.per_side.items())] \
-                or [f"{SIDE_LABEL.get(self.side, self.side)} {self.deletes} of {self.total}"]
+            parts = [f"{self._label(k)} {v['deletes']} of {v['total']}" for k, v in sorted(self.per_side.items())] \
+                or [f"{self._label(self.side)} {self.deletes} of {self.total}"]
             return f"too many deletes ({'; '.join(parts)}; limit {self.pct}%)"
-        return f"all files were changed on {SIDE_LABEL.get(self.side, self.side)}"
+        if self.check == "empty_source":
+            return (f"the {self._label('Path1')} listing has no files (besides the check file) while the NAS has "
+                    f"{self.total}: Mirror would move them all to the backup target")
+        if self.check == "max_delete_backstop":
+            return (f"the --max-delete backstop tripped during the Mirror run: up to {self.deletes} NAS file(s) "
+                    "were already moved to the backup target")
+        return f"all files were changed on {self._label(self.side)}"
 
     def as_dict(self) -> dict:
-        return dict(self.__dict__)
+        d = dict(self.__dict__)
+        if d.get("mode") == "two_way" and not d.get("cloud"):   # v0.8 shape for two-way aborts
+            d.pop("mode"), d.pop("cloud")
+        return d
 
 
 @dataclass
@@ -124,6 +142,8 @@ class Outcome:
     warning: str = ""        # classifier warning (code/text mismatch), logged by the caller
     crit_error: str = ""     # normalised "Bisync critical error: <err>" (SPEC v0.3 same-error rule)
     access_failed: bool = False   # log had "Access test failed:" (SPEC v0.3: escalate immediately)
+    deletes_skipped: bool = False  # v0.9 pull: rclone logged "not deleting files as there were IO errors"
+    app_wide: bool = False         # v0.9: the app's own Google credential failed (invalid_client)
 
 
 def normalise_crit_error(err: str) -> str:
@@ -209,14 +229,16 @@ def delta_summary(d: dict) -> str:
 
 
 def classify(exit_code: int | None, log_text: str, *, timed_out: bool = False, broker_auth: str = AUTH_OK,
-             stats: Stats | None = None) -> Outcome:
+             stats: Stats | None = None, provider: str = "onedrive") -> Outcome:
     """Pre-checks (not in the §9.4 list, which assumes rclone ran to completion):
-    broker auth > auth text in the log > worker time limit. Then SPEC §9.4 rules 1-6 in order."""
-    if broker_auth in (AUTH_REAUTH, AUTH_CA):
-        return Outcome(R_AUTH, f"Microsoft token refresh failed ({broker_auth})", broker_auth)
-    log_auth = log_auth_classification(log_text)
+    broker auth > auth text in the log > worker time limit. Then SPEC §9.4 rules 1-6 in order.
+    v0.9: provider 'gdrive' uses the Google error mapping (incl. the app-wide invalid_client)."""
+    idp = "Google" if provider == "gdrive" else "Microsoft"
+    if broker_auth in (AUTH_REAUTH, AUTH_CA, "app_credential"):
+        return Outcome(R_AUTH, f"{idp} token refresh failed ({broker_auth})", broker_auth)
+    log_auth = log_auth_classification(log_text, provider)
     if log_auth != AUTH_OK and exit_code != 0:
-        return Outcome(R_AUTH, f"Microsoft token refresh failed ({log_auth})", log_auth)
+        return Outcome(R_AUTH, f"{idp} token refresh failed ({log_auth})", log_auth)
     if timed_out:
         return Outcome(R_TIMEOUT, "run time limit reached; graceful stop, continues next slot")
 

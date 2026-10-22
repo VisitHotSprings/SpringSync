@@ -288,7 +288,7 @@ def test_auditor_sees_banner_read_only_and_cannot_change(db, kr, web):
 
 
 def test_migration_7(db):
-    assert db.schema_version() == 7
+    assert db.schema_version() >= 7
     cols = {r["name"] for r in db.all("PRAGMA table_info(sync_profiles)")}
     assert {"service_mode_until", "service_mode_by", "service_mode_at", "service_mode_reason"} <= cols
     rcols = {r["name"] for r in db.all("PRAGMA table_info(sync_runs)")}

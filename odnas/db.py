@@ -46,6 +46,13 @@ STATE_LABELS = {
     REMOVED: "Disconnected",
 }
 
+
+def state_label(state: str, provider: str | None = None) -> str:
+    """STATE_LABELS, naming the user's own cloud provider (v0.9)."""
+    label = STATE_LABELS.get(state, state)
+    return label.replace("Microsoft sign-in policy", "Google admin policy").replace("Microsoft", "Google") \
+        if provider == "gdrive" else label
+
 MIGRATIONS: list[str] = [
     # 1: initial schema
     """
@@ -268,6 +275,59 @@ MIGRATIONS: list[str] = [
     ALTER TABLE sync_runs ADD COLUMN deletes_path1 INTEGER;
     ALTER TABLE sync_runs ADD COLUMN deletes_path2 INTEGER;
     """,
+    # 8: v0.9 (SPEC v0.9 §5, §4.4, §6.6): Google Drive as a second cloud provider and per-user sync direction.
+    #    Expand-only (Mark's v0.9 rule: additive migration only), so sync_runs.kind keeps its v0.4 CHECK list
+    #    and the SPEC's new run kinds (pull_count / pull_copy / pull_mirror) are recorded in sync_runs.op
+    #    instead of rebuilding the table (OPEN-QUESTIONS §E.1).
+    #    google_credentials: the Google refresh token (own nonce, AAD google_credentials/<uid>/refresh_token).
+    #    sync_profiles.provider onedrive|gdrive; direction two_way|pull_copy|pull_mirror; gdocs_mode skip|export;
+    #      direction_changed_at/_by/_reason (last applied switch); direction_req* (an admin switch waiting for
+    #      the worker to apply it between runs); direction_then (the two-way switch queued behind a
+    #      "Mirror first" baseline); mirror_baseline_* (the §6.6 Mirror baseline count and its approval);
+    #      two_way_baseline_at (first normal bisync after a switch-back resync; service mode waits for it).
+    #    sync_runs.direction / provider / op are copied onto each run.
+    """
+    CREATE TABLE google_credentials (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        refresh_token_ct BLOB NOT NULL,
+        key_id TEXT NOT NULL,
+        google_sub TEXT NOT NULL,
+        google_email TEXT NOT NULL,
+        granted_scope TEXT NOT NULL,
+        token_obtained_at TEXT,
+        last_refresh_at TEXT,
+        last_refresh_error TEXT
+    );
+    CREATE UNIQUE INDEX google_credentials_sub ON google_credentials(google_sub);
+    ALTER TABLE sync_profiles ADD COLUMN provider TEXT NOT NULL DEFAULT 'onedrive'
+        CHECK (provider IN ('onedrive','gdrive'));
+    ALTER TABLE sync_profiles ADD COLUMN direction TEXT NOT NULL DEFAULT 'two_way'
+        CHECK (direction IN ('two_way','pull_copy','pull_mirror'));
+    ALTER TABLE sync_profiles ADD COLUMN gdocs_mode TEXT NOT NULL DEFAULT 'skip' CHECK (gdocs_mode IN ('skip','export'));
+    ALTER TABLE sync_profiles ADD COLUMN direction_changed_at TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN direction_changed_by TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN direction_reason TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN direction_req TEXT CHECK (direction_req IN ('two_way','pull_copy','pull_mirror'));
+    ALTER TABLE sync_profiles ADD COLUMN direction_req_by TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN direction_req_at TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN direction_req_reason TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN direction_req_mirror_first INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE sync_profiles ADD COLUMN direction_then TEXT CHECK (direction_then IN ('two_way'));
+    ALTER TABLE sync_profiles ADD COLUMN mirror_baseline_ok_at TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN mirror_baseline_count INTEGER;
+    ALTER TABLE sync_profiles ADD COLUMN mirror_baseline_total INTEGER;
+    ALTER TABLE sync_profiles ADD COLUMN mirror_baseline_counted_at TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN mirror_baseline_approved_by TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN mirror_baseline_approved_at TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN mirror_baseline_approved_count INTEGER;
+    ALTER TABLE sync_profiles ADD COLUMN mirror_baseline_state TEXT;
+    ALTER TABLE sync_profiles ADD COLUMN two_way_baseline_at TEXT;
+    ALTER TABLE sync_runs ADD COLUMN direction TEXT;
+    ALTER TABLE sync_runs ADD COLUMN provider TEXT;
+    ALTER TABLE sync_runs ADD COLUMN op TEXT;
+    UPDATE sync_profiles SET two_way_baseline_at = onboarding_completed_at WHERE onboarding_completed_at IS NOT NULL;
+    UPDATE sync_runs SET direction = 'two_way', provider = 'onedrive';
+    """,
 ]
 
 NAS_GLOBAL_PAUSE = "nas_global_pause"   # worker_state key (SPEC v0.6 §9.4, Option B only)
@@ -368,13 +428,17 @@ class DB:
 
     # ---- users ---------------------------------------------------------
     def create_user(self, entra_oid: str, upn: str, display_name: str, local_name: str, state: str,
-                    is_pilot: bool = True) -> str:
+                    is_pilot: bool = True, provider: str = "onedrive", direction: str = "two_way",
+                    gdocs_mode: str = "skip") -> str:
         uid, now = str(uuid.uuid4()), iso(utcnow())
+        if direction == "two_way":
+            gdocs_mode = "skip"   # SPEC v0.9 §9.6: export is refused for two-way
         with self.tx() as c:
             c.execute("INSERT INTO users(id, entra_oid, upn, display_name, local_name, state, is_pilot, created_at,"
                       " updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
                       (uid, entra_oid, upn, display_name, local_name, state, int(is_pilot), now, now))
-            c.execute("INSERT INTO sync_profiles(user_id, path1) VALUES (?, ?)", (uid, f"od-{uid}:"))
+            c.execute("INSERT INTO sync_profiles(user_id, path1, provider, direction, gdocs_mode) VALUES (?,?,?,?,?)",
+                      (uid, ("gd-" if provider == "gdrive" else "od-") + uid + ":", provider, direction, gdocs_mode))
         return uid
 
     def user(self, uid: str) -> sqlite3.Row | None:
@@ -410,6 +474,59 @@ class DB:
                "drive_id=COALESCE(excluded.drive_id, drive_id), drive_type=COALESCE(excluded.drive_type, drive_type), "
                "token_obtained_at=excluded.token_obtained_at, last_refresh_at=excluded.last_refresh_at, "
                "last_refresh_error=NULL", (uid, pack(s), s.key_id, drive_id, drive_type, now, now))
+
+    # Google (v0.9 §5): same handling as ms_credentials, own table and AAD.
+    def put_google_credential(self, kr: Keyring, uid: str, refresh_token: str, google_sub: str, google_email: str,
+                              granted_scope: str) -> None:
+        s = kr.seal(refresh_token, Keyring.aad("google_credentials", uid, "refresh_token"))
+        now = iso(utcnow())
+        self.q("INSERT INTO google_credentials(user_id, refresh_token_ct, key_id, google_sub, google_email, "
+               "granted_scope, token_obtained_at, last_refresh_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO "
+               "UPDATE SET refresh_token_ct=excluded.refresh_token_ct, key_id=excluded.key_id, "
+               "google_sub=excluded.google_sub, google_email=excluded.google_email, "
+               "granted_scope=excluded.granted_scope, token_obtained_at=excluded.token_obtained_at, "
+               "last_refresh_at=excluded.last_refresh_at, last_refresh_error=NULL",
+               (uid, pack(s), s.key_id, google_sub, google_email, granted_scope, now, now))
+
+    def google_credential(self, uid: str) -> sqlite3.Row | None:
+        return self.one("SELECT * FROM google_credentials WHERE user_id=?", (uid,))
+
+    def google_credential_by_sub(self, sub: str) -> sqlite3.Row | None:
+        return self.one("SELECT * FROM google_credentials WHERE google_sub=?", (sub,))
+
+    def google_refresh_token(self, kr: Keyring, uid: str) -> str | None:
+        r = self.google_credential(uid)
+        if not r:
+            return None
+        return kr.open(unpack(r["refresh_token_ct"], r["key_id"]),
+                       Keyring.aad("google_credentials", uid, "refresh_token"))
+
+    def rotate_google_token(self, kr: Keyring, uid: str, refresh_token: str) -> None:
+        s = kr.seal(refresh_token, Keyring.aad("google_credentials", uid, "refresh_token"))
+        self.q("UPDATE google_credentials SET refresh_token_ct=?, key_id=?, last_refresh_at=?, last_refresh_error=NULL"
+               " WHERE user_id=?", (pack(s), s.key_id, iso(utcnow()), uid))
+
+    def user_provider(self, uid: str) -> str:
+        p = self.one("SELECT provider FROM sync_profiles WHERE user_id=?", (uid,))
+        return p["provider"] if p else "onedrive"
+
+    def cloud_credential(self, uid: str) -> sqlite3.Row | None:
+        """The credential row of the user's CURRENT provider (sync_profiles.provider), or None."""
+        p = self.one("SELECT provider FROM sync_profiles WHERE user_id=?", (uid,))
+        if p is None:
+            return None
+        return self.google_credential(uid) if p["provider"] == "gdrive" else self.ms_credential(uid)
+
+    def erase_cloud_credentials(self, uid: str) -> None:
+        """Provider change (SPEC v0.9 §4.4): crypto-erase BOTH cloud credentials (secure_delete + VACUUM);
+        the NAS login is kept. The app session stays Microsoft, so the user just connects the new provider."""
+        with self._wlock:
+            c = self.conn
+            c.execute("PRAGMA secure_delete=ON")
+            with self.tx() as t:
+                t.execute("DELETE FROM ms_credentials WHERE user_id=?", (uid,))
+                t.execute("DELETE FROM google_credentials WHERE user_id=?", (uid,))
+            c.execute("VACUUM")
 
     def rotate_refresh_token(self, kr: Keyring, uid: str, refresh_token: str) -> None:
         s = kr.seal(refresh_token, Keyring.aad("ms_credentials", uid, "refresh_token"))
@@ -452,6 +569,7 @@ class DB:
             c.execute("PRAGMA secure_delete=ON")
             with self.tx() as t:
                 t.execute("DELETE FROM ms_credentials WHERE user_id=?", (uid,))
+                t.execute("DELETE FROM google_credentials WHERE user_id=?", (uid,))
                 t.execute("DELETE FROM nas_credentials WHERE user_id=?", (uid,))
             c.execute("VACUUM")
 
@@ -466,7 +584,7 @@ class DB:
 
     def runs(self, uid: str, limit: int = 20) -> list[sqlite3.Row]:
         return self.all("SELECT id, started_at, ended_at, kind, exit_code, result, files_copied, files_deleted, bytes,"
-                        " conflicts, errors_count, throttled, detail, service_mode FROM sync_runs WHERE user_id=? "
+                        " conflicts, errors_count, throttled, detail, service_mode, direction, provider, op FROM sync_runs WHERE user_id=? "
                         "ORDER BY id DESC LIMIT ?", (uid, limit))
 
     def open_issue(self, uid: str | None, type_: str, severity: str, summary: str) -> bool:

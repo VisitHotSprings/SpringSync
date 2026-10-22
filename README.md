@@ -1,4 +1,4 @@
-# SpringSync (working name), v0.1 lab build
+# SpringSync (working name), v0.9 lab build
 
 SpringSync is a small service for the Visit Hot Springs LAN. It keeps each person's **OneDrive for Business**
 and their **UniFi NAS home folder** in two-way sync, using one `rclone bisync` job per user.
@@ -9,7 +9,16 @@ and their **UniFi NAS home folder** in two-way sync, using one `rclone bisync` j
   Entra groups, pause/resume, approve resync, offboard.
 - **Auditors** (Walter) get a strictly read-only status page and audit-log view.
 
-> **Status: lab-only v0.1.** Nothing has been deployed. The build spec is `../SPEC.md` (source of truth) and the
+**v0.9 (SPEC v0.9):**
+- **Cloud provider per user:** Microsoft OneDrive or **Google Drive (My Drive)**. Everyone still signs in to
+  the app with Microsoft; Google users then click **Connect Google Drive** on their page.
+- **Direction per user:** Two-way (bisync, default), **One-way pull: Copy only** (`rclone copy`, never
+  deletes on the NAS) or **One-way pull: Mirror** (`rclone sync`: counts deletes first, holds them to the
+  delete limit, and moves removed NAS files to a dated folder on the backup NAS instead of deleting them).
+  Admins switch directions with a reason; the worker applies it between runs.
+- **Windows file-name rules** on every rclone command (`--local-encoding`), and Windows/Google preflight rules.
+
+> **Status: lab-only (v0.9.0).** Nothing has been deployed. The build spec is `../SPEC.md` (source of truth) and the
 > background research is `../research.md`. `OPEN-QUESTIONS.md` lists everything that blocks a pilot.
 
 The product name is not final. The Python package is deliberately neutral (`odnas`). The display name and the
@@ -204,7 +213,7 @@ sudo REPO_URL=git@github.com:<OWNER>/<REPO>.git TENANT_ID=... CLIENT_ID=... \
      GROUP_USERS=... GROUP_ADMINS=... GROUP_AUDITORS=... \
      SYNC_HOST=sync.hotsprings.org GCP_ACME_PROJECT=... ACME_ZONE=... \
      LAN_CIDRS="10.0.0.0/16" ADMIN_CIDR="10.0.10.0/24" LOG_READERS="walter" \
-     ./deploy/install.sh --version v0.8.0           # add --dry-run to see the plan first
+     ./deploy/install.sh --version v0.9.0           # add --dry-run to see the plan first
 ```
 `install.sh` is idempotent: every step checks state first, and it never overwrites keys, the DB, or settings.
 It handles:
@@ -241,6 +250,7 @@ Updates: `sudo /opt/springsync/current/deploy/update.sh vX.Y.Z`. Rollback:
 | `db_path`, `state_dir`, `log_dir`, `runtime_dir`, `mount_root`, `keys_dir`, `etc_dir` | derived from slug | see SPEC §8.2 |
 | `rclone_bin` | `/usr/local/bin/rclone` | |
 | `nas_host`, `nas_share` | `unas.hotsprings.local`, `Personal-Drive` | bootstrap defaults for the GUI |
+| `[google] client_id`, `allowed_domain`, `redirect_path` | –, –, `/auth/google/callback` | v0.9; no client id = Google hidden |
 
 ### Secrets (files only; `$CREDENTIALS_DIRECTORY` via `LoadCredentialEncrypted=`)
 | Name | Purpose |
@@ -248,6 +258,7 @@ Updates: `sudo /opt/springsync/current/deploy/update.sh vX.Y.Z`. Rollback:
 | `data.key` | 32-byte AES-256-GCM data key (`data.key.old` is optional during rotation) |
 | `entra-app.key` | Entra app certificate private key |
 | `entra-client-secret` | fallback client secret (secret mode / tmpfs_config only) |
+| `google-client.secret` | v0.9 Google OAuth client secret (web + worker; needs Mark's OK, docs/DEPLOY.md) |
 
 ### GUI settings (DB `settings` table; admin page; every change audited)
 | Group | Key | Default | Secret |
@@ -256,6 +267,9 @@ Updates: `sudo /opt/springsync/current/deploy/update.sh vX.Y.Z`. Rollback:
 | NAS | `nas_svc_password` (Option B) | – | yes |
 | Schedule | `default_interval_min`, `active_hours`, `max_concurrent`, `run_time_limit_min`, `resync_bwlimit`, `resync_hours`, `stale_hours` | `30`, always, `2`, `25`, –, `18:00-07:00`, `24` | |
 | Safety | `default_max_delete_pct`, `check_weekday`, `check_time` | `10`, `6` (Sun), `03:00` | |
+| Cloud (v0.9) | `providers_enabled`, `default_direction`, `gdrive_users`, `pull_backup_target`, `backup_nas_host`, `backup_nas_share`, `backup_nas_username` | `onedrive,gdrive`, `two_way`, –, `backup_nas`, –, `Sync-Archive`, – | |
+| Cloud (v0.9) | `backup_nas_password` | – | yes |
+| Google (v0.9) | `google_allowed_domain`, `google_email_aliases`, `google_gdocs_default`, `google_export_formats`, `google_client_secret_expires_on` | `hotsprings.org`, –, `skip`, `docx,xlsx,pptx,svg`, – | |
 | Alerts | `alert_recipients`, `smtp_host`, `smtp_port`, `smtp_starttls`, `smtp_username` | –, –, `587`, on, – | |
 | Alerts | `smtp_password` | – | yes |
 | Pilot | `pilot_only`, `pilot_list` | on, empty (nobody) | |

@@ -16,13 +16,20 @@ Email delivery is disabled in v0.1 (open decision: alert mail path). Alerts show
 {% for k, sp in specs.items() if sp.group == g %}
 <label>{{ sp.label }}<br>
 {% if sp.secret %}<input type="password" name="{{ k }}" placeholder="{{ '*** set (type to replace)' if set_flags[k] else 'not set' }}">
-{% elif k == 'pilot_list' %}<textarea name="{{ k }}" rows="5">{{ s[k] }}</textarea>
-{% elif k in ('pilot_only','smtp_starttls') %}<input type="hidden" name="{{ k }}__present" value="1"><input type="checkbox" name="{{ k }}" {{ 'checked' if s[k] }}>
+{% elif k in list_keys %}<textarea name="{{ k }}" rows="5">{{ s[k] }}</textarea>
+{% elif k in bool_keys %}<input type="hidden" name="{{ k }}__present" value="1"><input type="checkbox" name="{{ k }}" {{ 'checked' if s[k] }}>
 {% else %}<input type="text" name="{{ k }}" value="{{ s[k] }}">{% endif %}
 {% if sp.help %}<br><small>{{ sp.help }}</small>{% endif %}
 {% if s.meta.get(k) %}<br><small>changed {{ s.meta[k].updated_at|local }}</small>{% endif %}
 </label>{% endfor %}</fieldset>{% endfor %}
 <button>Save settings</button></form>
+
+<fieldset><legend>Backup target for one-way runs (v0.9)</legend>
+<p>{{ 'Backup NAS share' if s.pull_backup_target == 'backup_nas' else 'Same share (.springsync-archive in each home folder)' }}{% if s.pull_backup_target == 'backup_nas' %}: \\{{ s.backup_nas_host or '?' }}\{{ s.backup_nas_share }}{% endif %}.
+{% if backup_test %}Last test {{ backup_test.at|local }}: <strong>{{ backup_test.result }}</strong>{% if backup_test.message %} ({{ backup_test.message }}){% endif %}.{% else %}Not tested yet.{% endif %}
+<br><small>The backup NAS share needs Mark's OK before use. While the target is unavailable, one-way runs are skipped (nothing is replaced or removed without a backup).</small></p>
+<form method="post" action="/admin/settings/backup-test"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Test backup target</button></form></fieldset>
+{% if google_configured %}<p><small>Google Drive: OAuth client configured.</small></p>{% else %}<p><small>Google Drive: no OAuth client configured (needs Mark's OK, see DEPLOY.md); "Connect Google Drive" is hidden.</small></p>{% endif %}
 
 <fieldset><legend>Test NAS login (your own test credential; never stored)</legend>
 <form method="post" action="/admin/settings/nas-test" autocomplete="off"><input type="hidden" name="csrf" value="{{ csrf }}">

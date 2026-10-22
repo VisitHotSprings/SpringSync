@@ -1,5 +1,118 @@
 # Changelog
 
+## 0.9.0 (unreleased, lab build, 2026-10-21). Follows SPEC.md v0.9 (§4.3, §4.4, §6.6, §9.6–§9.8, §13.1)
+Built in the §13.1 order: one-way pull first (works with OneDrive), then Google Drive. No Windows port (v0.10).
+Nothing here touched Microsoft, Google, the NAS, Entra, Google Admin or DNS; all tests use fakes or local paths.
+
+### Added: one-way pull (`odnas/pull.py`, `odnas/cloud.py`)
+- **Per-user direction** `sync_profiles.direction`: `two_way` (default, unchanged bisync), `pull_copy`
+  ("Copy only": `rclone copy`, never deletes on the NAS) and `pull_mirror` ("Mirror": `rclone sync
+  --delete-after`). Global default: setting `default_direction` (applies to new users).
+- **Mirror safety (§9.7.2):**
+  1. Guard 2: `rclone lsf --max-depth 1` must see `.springsync-check` at the cloud root AND the NAS root,
+     else `critical` (Access test failed). Applies to Copy only too.
+  2. Guard 3: the backup target must be reachable and writable (marker written and removed), else the run
+     is **skipped** with a `medium` `backup_target_unavailable` alert and no state change.
+  3. Counting dry-run first: the same `sync` with `--dry-run --max-delete -1 --combined <tmpfs file>`
+     (op `pull_count`). `-` lines = NAS files Mirror would move. The combined file has file names: it lives
+     in `/run`, is shredded after parsing, and only the 0600 delta document (admin-only page) keeps names.
+  4. Over the user's delete limit (same `max_delete_pct` as two-way) → `safety_abort`, nothing moved.
+     An **empty cloud listing** with a non-empty NAS → `safety_abort` (`empty_source`), even in service mode.
+  5. The real run gets `--max-delete floor(total × pct / 100)` as a backstop. Exit 7 + `--max-delete
+     threshold reached` → `safety_abort` (the record says up to N files may already be moved).
+- **Removed and replaced NAS files are moved, never deleted:** `--backup-dir` to a new folder per run,
+  `<target>/<user_id>/<YYYY-MM-DD_HHMMSS>` (UTC stamp), so two runs never overwrite each other.
+- **Backup target** (`odnas/nas.py` `BackupTarget`): `pull_backup_target` = `backup_nas` (default;
+  `backup_nas_host`, `backup_nas_share` = `Sync-Archive`, `backup_nas_username`, `backup_nas_password`
+  secret) or `same_share` (`.springsync-archive` in the user's share). Settings has a **Test backup target**
+  button (worker flag `backup_test_requested`, result in heartbeat `backup_test`, audited).
+  **The Sync-Archive share and its login need Mark's OK; nothing creates them.**
+- **Mirror baseline (§6.6):** switching to Mirror (or onboarding as Mirror) counts what the first Mirror
+  would move; an admin approves that exact count (typed UPN, 24 h TTL, expired approvals → `medium`
+  alert); a recount that differs cancels the run. While waiting, the user gets **Copy only** runs.
+  Onboarding Mirror users approve the count with **Approve initial sync**.
+- **Classifier for pull runs** (§9.7.4) `pull.classify_pull`: auth > time limit > exit code; exit 7 with the
+  pinned message → `safety_abort`; 1,3,4,5,6,8,10 retryable (`deletes_skipped` when rclone logs
+  `not deleting files as there were IO errors`); 2 usage; others `critical_retryable`.
+- **Safety-abort actions for one-way users:** Accept deletes (one Mirror run with the exact count),
+  **Switch to Copy only**, **Retry**. **Restore is refused** (409; the cloud is never written).
+- **Weekly check for one-way users:** `rclone check --one-way` (NAS-only files are expected).
+- **Safe direction switching** (§6.6), applied by the worker between runs, never during one:
+  - reason required, audited `direction_switch_requested` / `direction_switched`, `low` alert;
+  - two-way → one-way: bisync listings set aside (`*.lst*` → `-old-<ts>`), next slot pulls;
+  - one-way → two-way: listings deleted, back to **onboarding** (preflight, dry run, Approve initial
+    sync), Google-native export forced back to skip, service mode waits for `two_way_baseline_at`;
+  - Copy only → two-way defaults to **Mirror first** (`direction_then = two_way`) so NAS-only files go
+    to the backup target instead of being uploaded; untick to upload them;
+  - a switch for a paused / needs-reauth / blocked / NAS-auth-failed user waits; a switch out of
+    `safety_abort` / `critical` clears the stop and its approvals (audited `direction_switch_cleared_pending`).
+- **Service mode per direction:** two-way unchanged (`--max-delete 100`); Mirror: no % stop and no
+  `--max-delete` backstop (empty-source, check-file and backup guards stay); Copy only: no effect.
+  The service-mode picker shows the effect per user.
+
+### Added: Google Drive (My Drive) as a per-user connected drive (`odnas/google.py`, §4.3, §4.4, §9.6)
+- **App sign-in stays Microsoft for everyone.** No "Sign in with Google". Google is a data connection:
+  a signed-in user whose provider is Google clicks **Connect Google Drive** on /me
+  (`POST /me/google/connect` → `GET /auth/google/callback`). The callback requires the same Microsoft
+  session that started the flow (flow sealed with user id + session id).
+- Checks: `hd` = `google_allowed_domain` (`hotsprings.org`), verified email, email = the user's UPN or an
+  approved alias (`google_email_aliases`), the Google `sub` not linked to another user, the Drive
+  account = the signed-in account, Drive scope actually granted. Denials audited with a reason code.
+- **One provider per user** (`sync_profiles.provider` = `onedrive` | `gdrive`). New users get `gdrive` if
+  their UPN is in the `gdrive_users` setting, else `onedrive`. Google users' Microsoft refresh token is not
+  stored. Admin **Switch cloud provider** (reason + typed UPN, refused while a run is active) erases both
+  cloud credentials (secure_delete + VACUUM) and listings, keeps NAS files and the NAS login, and sends the
+  user back to onboarding (audited `admin_set_provider`).
+- New table **`google_credentials`** (sealed refresh token, AAD `google_credentials/<uid>/refresh_token`,
+  `google_sub` unique, `google_email`, `granted_scope`, refresh times/errors). Included in rekey and
+  crypto-erase.
+- **rclone `drive` remote `gd-<id>`** with exactly the §9.6 keys (`scope = drive`, `root_folder_id` empty,
+  `skip_gdocs`, `skip_shortcuts`, `skip_dangling_shortcuts`, `stop_on_upload_limit`, `export_formats`
+  only when exporting). Token via the same broker (`token_url` → `127.0.0.1:8081`), **T-G2 untested**.
+- **Google-native files** skipped by default (`google_gdocs_default = skip`); `export` (formats
+  `google_export_formats`, default `docx,xlsx,pptx,svg`) only for one-way users and refused for two-way.
+- **Google error handling:** `invalid_grant`/`invalid_rapt` → needs_reauth; `admin_policy_enforced`/
+  `org_internal` → blocked (label "Google admin policy"); `invalid_client`/`unauthorized_client` →
+  **app-wide**: one `high` alert, flag `google_app_credential`, all Google users skipped until the worker is
+  restarted with a fixed client secret (flag cleared at startup, audited). Two-way 750 GB/day upload stop
+  → retryable next day + `low` alert.
+- **Settings:** `providers_enabled` (`onedrive,gdrive`; a disabled provider's users show a banner and do
+  not sync), `gdrive_users`, `google_allowed_domain`, `google_email_aliases`, `google_gdocs_default`,
+  `google_export_formats`, `google_client_secret_expires_on` (maint reminders ≤30 days / overdue).
+- **Bootstrap:** `[google] client_id`, `allowed_domain`, optional `redirect_path`; the client secret is the
+  credential file `google-client.secret` (LoadCredentialEncrypted); placeholders only in the repo.
+
+### Added: Windows file-name rules from day one (§9.8)
+- Every rclone command (bisync, copy, sync, check, lsf, lsjson, touch) passes the pinned
+  `--local-encoding "Slash,LtGt,DoubleQuote,Colon,Question,Asterisk,Pipe,BackSlash,Ctl,RightSpace,RightPeriod,InvalidUtf8,Dot"`.
+- Preflight adds `win_reserved_name` (CON, PRN, AUX, NUL, COM1–9, LPT1–9 incl. ¹²³), `win_reserved_char`,
+  `win_trailing_space_or_dot`, `win_path_too_long` (UNC > 259); Google rules `google_duplicate_name`,
+  `google_slash_in_name`, plus counts of Google-native files and (one-way) NAS-only files.
+
+### Changed
+- `sync_runs` gains `direction`, `provider` and `op` (`bisync`, `pull_count`, `pull_copy`, `pull_mirror`, …).
+  Pages show provider, direction, Mirror baseline state, the plain-language Mirror warning and the op of
+  each run. The auditor view shows all of it read-only.
+- Version 0.9.0 (User-Agent `…|SpringSync/0.9`).
+
+### Deviations from SPEC v0.9 (flagged in OPEN-QUESTIONS.md §E)
+- **No `sync_runs.kind` rebuild:** the additive-only rule forbids rebuilding the table for the CHECK
+  constraint, so the new kinds are recorded in `sync_runs.op`; `kind` keeps the lifecycle meaning.
+- **Backup NAS mount path:** mounted by the existing mount helper under a reserved id
+  (`/srv/<slug>/mnt/00000000-0000-4000-8000-00000000a5c1`) instead of `/srv/springsync/archive`, so no
+  helper change is needed. It stays mounted between runs.
+- **One-time `filters_changed` on upgrade:** the local-encoding string is part of the baseline digest, so
+  every two-way user needs one approved resync after the upgrade from 0.8 (Mirror users recount the
+  baseline). This is intended: names may change once.
+- **Copy only runs no pre-count**, and the all-files-changed check is not applied to pull runs (§9.7).
+- Backup folder stamps are UTC.
+
+### Migration
+- Migration 8 (expand-only): `google_credentials`; new `sync_profiles` columns with defaults
+  (`provider = onedrive`, `direction = two_way`, `gdocs_mode = skip`); existing users get
+  `two_way_baseline_at = onboarding_completed_at`; existing runs get `direction = two_way`,
+  `provider = onedrive`. v0.8 code still runs against the new schema.
+
 ## 0.8.0 (unreleased, lab build, 2026-10-20). Follows SPEC.md v0.8 (§9.5 Service mode; Mark's request)
 ### Added
 - **Service mode** (`odnas/service_mode.py`):

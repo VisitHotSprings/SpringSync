@@ -1,4 +1,4 @@
-# Open questions and blockers (v0.1)
+# Open questions and blockers (v0.1, updated through v0.9)
 
 Nothing in this repo has touched production: no Entra, NAS, DNS, GitHub, or server, and no real sign-in.
 Everything below has to be resolved, or tested in a lab, **before the 3–5 user pilot**.
@@ -17,6 +17,8 @@ Everything below has to be resolved, or tested in a lab, **before the 3–5 user
 | **T-X1** | 9 | UniFi Drive's native M365 backup for the pilot users | The "OneDrive on/off" decision |
 | **T-A3** | spec | rclone refreshes through `token_url` → our broker with a per-run handle. The rotated token is saved, no real token is on disk, and it holds up over long runs. **Untested; code ready.** | `BrokerTokenStrategy` (default). If it fails, set `token_mode = "tmpfs_config"` + `credential_type = "secret"`. |
 | **T-A4** | spec (research §6 #20) | rclone lists, uploads, and deletes with only `Files.ReadWrite offline_access` and `disable_site_permission = true` | `tokens.render_rclone_config` |
+| **T-G1..G3** | v0.9 | Google Cloud project, Internal client, Trusted app (needs Mark's OK); broker refresh for rclone `drive` (T-G2, untested); Google specifics (Docs skipped/exported, shortcuts, duplicates, trash, 403/429) | `odnas/google.py`, `tokens.render_drive_config`, preflight Google rules |
+| **T-M1** | v0.9 | Mirror / Copy only to UNAS #2 `Sync-Archive` (cross-NAS move = copy + delete), time per 1,000 files, retention | `BackupTarget`, `pull.build_pull` |
 | **T-C1** | spec / §14.12 | The Caddy v2.11.7 + googleclouddns build issues a cert from LE staging, then production, through the CNAME to the ACME zone with the minimal SA, and writes to other RRsets are denied | `install.sh` step 5, Caddyfile |
 
 Also not covered by local tests:
@@ -171,3 +173,48 @@ Also not covered by local tests:
     would allow it.
 16. **The internal web→worker token** is HMAC-derived from the data key, not a separate secret.
 17. **Option B "mounted persistently"** is per-run idempotent mounts. A boot-time mount unit is not built.
+
+## E. v0.9 build findings and deviations (Dex)
+1. **`sync_runs.kind` was not rebuilt.** SPEC v0.9 adds run kinds; changing the CHECK constraint means a
+   table rebuild, which the additive-only rule forbids. The new kinds are in the new `sync_runs.op` column
+   (`bisync`, `pull_count`, `pull_copy`, `pull_mirror`); `kind` keeps its lifecycle meaning (dryrun,
+   resync, bisync, delta, force, check). OK, or should a later release do the rebuild?
+2. **Backup NAS mount point** is `/srv/<slug>/mnt/<reserved id>` through the existing helper, not
+   `/srv/springsync/archive` as in the §9.7.3 example. It stays mounted between runs. OK?
+3. **Upgrade from 0.8 trips `filters_changed` once** because the pinned local-encoding string is part of the
+   baseline digest. Every two-way user needs one approved resync after the upgrade (Mirror users recount
+   their baseline). Intended, but it's 77 approvals: should there be a bulk approve?
+4. **Copy only has no pre-count**, and the all-files-changed check does not apply to pull runs (the SPEC's
+   §9.7.2 guards are for Mirror). The brief said "keep the checks"; confirm Copy only is fine with guards 2
+   and 3 only (its replacements always go to the backup target).
+5. **Mirror backstop:** the real run's `--max-delete N` can move up to N files before it trips (exit 7);
+   those files are already in the backup folder. Integration-tested on v1.75.2.
+6. **Mirror under service mode** has no % stop and no backstop; only the empty-source, check-file and
+   backup guards remain (§9.5). Same risk as two-way service mode (§D.2 / §14.15).
+7. **Mirror while waiting for the baseline** runs Copy only (never deletes), so cloud changes keep arriving.
+8. **Switching back to two-way without "Mirror first"** uploads every NAS-only file to the cloud on the
+   onboarding resync. The default from Copy only is Mirror first; from Mirror it's not needed.
+9. **Google duplicate names** are reported by preflight and then skipped by rclone (one of them is not
+   synced). Folder shortcuts are skipped by rclone and not counted (rclone hides them in listings).
+10. **Google users' Microsoft refresh token is not stored** (their session is still Microsoft). A
+    provider switch to OneDrive therefore needs the user to sign in again.
+11. **New users get their provider from `gdrive_users`** (a UPN list in Settings) at first sign-in;
+    afterwards only the admin's Switch cloud provider changes it. OK, or should IT pick per user before
+    first sign-in some other way?
+12. **App-wide Google client failure** (`invalid_client`) stops all Google users until the worker restarts
+    (one high alert, admin/auditor banner). There is no "clear" button on purpose (the secret is a file).
+13. **T-G2 (broker refresh for rclone `drive`)** is untested; the tmpfs-config fallback is wired for Google.
+14. **Backup stamps are UTC** (`YYYY-MM-DD_HHMMSS`), not Central time.
+
+## F. SPEC v0.9 §14.19–§14.27 (open; defaults as built)
+| SPEC | Question | Who | Built default |
+|---|---|---|---|
+| §14.19 | Cloud scope for one-way users: `drive` / `Files.ReadWrite` for everyone (check file + no reconnect on switch) vs. `drive.readonly` / `Files.Read` for one-way-only users | Walter | `drive` and `Files.ReadWrite` for everyone. Read-only scope would need a saved root-folder id instead of the cloud check file, and a reconnect to switch to two-way. |
+| §14.20 | Backup target: share name, retention (suggest 90 days), who may read it; creating it **needs Mark's OK** | Mark, Walter | `backup_nas`, `Sync-Archive`; runs skipped until it's configured and tested. Fallback `same_share`. |
+| §14.21 | Who sets direction and provider; default direction; users picking their own; a second provider later | Mark | Admins only, per user; `default_direction = two_way`; one provider per user. |
+| §14.22 | Copy only and NAS edits: cloud replaces (old NAS copy to backup) vs. `--update` (keep newer NAS files) | Mark | Cloud replaces; old version to the backup target. `--update` not built. |
+| §14.23 | Google-native files: export for one-way users (docx/xlsx/pptx or pdf)? | Mark | Skip for everyone (`google_gdocs_default = skip`); per-user export allowed for one-way only (`docx,xlsx,pptx,svg`). |
+| §14.24 | Google email = UPN, or aliases? Test-only admin Google sign-in for the Ubuntu test (needs Walter's OK) | Mark, Walter | Aliases via `google_email_aliases`. **No test-only Google sign-in built** (app login stays Microsoft). |
+| §14.25 | Windows NAS access Option A vs. B (error 1219); recommendation B; T-W4 | Mark | Not in scope (v0.10). |
+| §14.26 | Windows host: machine with TPM 2.0 + UPS, Intune ring, restart window (Sun 03:00–05:00 CT), BitLocker key escrow, remote management | Mark, Margaret | Not in scope (v0.10). |
+| §14.27 | Google data volume / API cost (1 TB/day egress threshold); Dec 2026 move to M365 may make Google short-term | Mark | No code limit; use `resync_bwlimit` and seed over several nights; Copy only is the final Google → NAS pull. |

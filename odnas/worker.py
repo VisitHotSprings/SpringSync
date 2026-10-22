@@ -15,20 +15,21 @@ from pathlib import Path
 from typing import Callable
 
 from odnas import db as D
-from odnas import service_mode, settings_store
-from odnas.bisync import render_filters
+from odnas import cloud, service_mode, settings_store
+from odnas.bisync import baseline_digest
 from odnas.config import TOKEN_MODE_BROKER, Config
 from odnas.crypto import Keyring
 from odnas.entra import EntraClient
-from odnas.nas import V_AUTH_FAILED, V_OK, MountHelperClient, NasAccessProvider, provider_from_settings
+from odnas.nas import V_AUTH_FAILED, V_OK, BackupTarget, MountHelperClient, NasAccessProvider, provider_from_settings
 from odnas.notify import Alert, Alerter, Notifier
-from odnas.runner import (JobRunner, ProcessRunner, _recipients, accept_expired, expire_accept_approvals,
-                          set_nas_global_pause, sweep_runtime)
+from odnas.runner import (GOOGLE_APP_FLAG, JobRunner, ProcessRunner, _recipients, accept_expired,
+                          expire_accept_approvals, set_nas_global_pause, sweep_runtime)
 from odnas.scheduler import (ThrottleGovernor, assign_offsets, in_window, seconds_until_window_end,
                              weekly_check_due)
 from odnas.tokens import BrokerTokenStrategy, TmpfsConfigStrategy, TokenBroker
 
 NAS_HEALTH_INTERVAL_MIN = 15   # SPEC v0.7 health check (Option B)
+BACKUP_TEST_FLAG = "backup_test_requested"   # v0.9: Settings "Test" button for the backup NAS
 log = logging.getLogger("odnas.worker")
 
 
@@ -36,17 +37,19 @@ class Worker:
     def __init__(self, cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient, *,
                  notifier: Notifier | None = None, proc: ProcessRunner | None = None,
                  helper: MountHelperClient | None = None,
-                 provider_factory: Callable[[], NasAccessProvider] | None = None):
+                 provider_factory: Callable[[], NasAccessProvider] | None = None, google=None,
+                 backup: BackupTarget | None = None):
         self.cfg, self.db, self.kr, self.entra = cfg, db, kr, entra
         self.alerter = Alerter(db, notifier)
-        self.broker = TokenBroker(db, kr, entra, cfg)
+        self.broker = TokenBroker(db, kr, entra, cfg, google=google)   # google: lazily HttpGoogleClient
         self.strategy = BrokerTokenStrategy(cfg, db, self.broker) if cfg.token_mode == TOKEN_MODE_BROKER \
             else TmpfsConfigStrategy(cfg, db, kr)
         self.helper = helper or MountHelperClient(cfg)
         self.governor = ThrottleGovernor()
         self.provider_factory = provider_factory or (lambda: provider_from_settings(cfg, self.settings(), self.helper))
+        self.backup = backup or BackupTarget(cfg, self.helper)
         self.runner = JobRunner(cfg, db, kr, self.strategy, self.provider_factory, self.settings, self.alerter,
-                                proc, self.governor)
+                                proc, self.governor, self.backup)
         self._running: dict[str, tuple[str, Future]] = {}
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="job")
@@ -75,17 +78,27 @@ class Worker:
         if n:
             log.warning("swept %d stale per-run secret file(s)", n)
         self.drain_flag.unlink(missing_ok=True)
+        if self.db.clear_flag(GOOGLE_APP_FLAG):
+            # v0.9 §4.3: after fixing/rotating the Google client secret the worker is restarted (it loads the
+            # credential at start); Google runs resume and re-trip once if it is still wrong.
+            self.db.audit("system", "google_app_credential_cleared", "", {"reason": "worker_restart"})
+            self.alerter.resolve(None, "google_app_credential")
         self.check_filters()
         self.db.audit("system", "worker_started", "", {"token_mode": self.strategy.name})
 
     def check_filters(self) -> bool:
-        """A release that changes the filters file sets needs_resync for all users (SPEC §9.3)."""
-        _, md5 = render_filters(self.cfg)
+        """A release that changes the filters file (or, v0.9 §9.8, the pinned --local-encoding) needs a new
+        baseline (SPEC §9.3, §6.6): two-way users need an approved resync; Mirror users a new Mirror
+        baseline; Copy-only users nothing (copy never deletes)."""
+        md5 = baseline_digest(self.cfg)
         prev = self.db.heartbeat("filters_md5")
         self.db.beat("filters_md5", md5)
         if prev and prev["detail"] != md5:
             self.db.q("UPDATE sync_profiles SET needs_resync=1, resync_approved_by=NULL, resync_approved_at=NULL "
-                      "WHERE user_id IN (SELECT id FROM users WHERE state IN ('active','critical'))")
+                      "WHERE direction='two_way' AND user_id IN (SELECT id FROM users WHERE state IN "
+                      "('active','critical'))")
+            self.db.q("UPDATE sync_profiles SET " + ", ".join(f"{k}=NULL" for k in cloud.BASELINE_CLEAR) +
+                      " WHERE direction='pull_mirror'")
             self.db.audit("system", "filters_changed", "", {"old": prev["detail"], "new": md5})
             self.alerter.raise_(Alert("filters_changed", "high",
                                       "bisync filters changed in this release: every user needs an approved resync"))
@@ -96,7 +109,11 @@ class Worker:
     def choose_job(self, u, s, now: datetime) -> str | None:
         """Decide what (if anything) to run for this user right now. Pure w.r.t. side effects."""
         st = u["state"]
-        has_ms = self.db.ms_credential(u["id"]) is not None
+        if st != D.OFFBOARDING and not cloud.provider_enabled(u, s):
+            return None   # v0.9: provider disabled in Settings -> paused with a banner (data untouched)
+        if cloud.provider(u) == cloud.PROVIDER_GD and self.db.flag(GOOGLE_APP_FLAG) is not None:
+            return None   # v0.9 §4.3: the app's Google client was rejected: no Google runs until fixed
+        has_ms = self.db.cloud_credential(u["id"]) is not None   # the CURRENT provider's credential
         provider_needs_creds = s.nas_option == "A"
         has_nas = (not provider_needs_creds) or self.db.nas_credential_meta(u["id"]) is not None
         if st == D.OFFBOARDING:
@@ -142,6 +159,19 @@ class Worker:
             return None
         if st != D.ACTIVE:
             return None  # paused, needs_reauth, nas_auth_failed, blocked_by_ca, removed: no attempts
+        if cloud.is_pull(u):
+            # v0.9 §9.7: needs_resync only matters for a later return to two-way (always a fresh baseline)
+            if not in_window(now, settings_store.active_window(s)):
+                return None
+            if cloud.baseline_needed(u):
+                if cloud.baseline_approved(u, now):
+                    return "force"           # the approved Mirror baseline (recount first)
+                if not u["mirror_baseline_counted_at"]:
+                    return "delta"           # count what Mirror would move
+            if weekly_check_due(now, D.parse_iso(u["last_check_at"]), s.check_weekday, s.check_time):
+                return "check"
+            nxt = D.parse_iso(u["next_run_at"])
+            return "bisync" if nxt is None or nxt <= now else None   # Copy, or Mirror after its guards
         if u["needs_resync"]:
             return "resync" if approved and resync_ok else None
         if not in_window(now, settings_store.active_window(s)):
@@ -267,6 +297,9 @@ class Worker:
         expire_accept_approvals(self.db, self.alerter, s, now)
         service_mode.expire(self.db, self.alerter, now, s)
         self._tonight_holds(users, s, now)
+        cloud.apply_direction_changes(self.db, self.alerter, s, self.cfg, self.running(), now, _recipients(s))
+        cloud.expire_baseline_approvals(self.db, self.alerter, _recipients(s), now)
+        self._backup_test(s, now)
         nas_paused = self._nas_global_pause(s, now)
         if not nas_paused:
             self._nas_health(s, now)
@@ -299,6 +332,19 @@ class Worker:
                 f.result()
         return started
 
+    def _backup_test(self, s, now: datetime) -> None:
+        """v0.9 Settings 'Test' for the backup target: requested by the web app, run here (the worker is the
+        only process that mounts). Result in heartbeat `backup_test` (status and time only)."""
+        f = self.db.flag(BACKUP_TEST_FLAG)
+        if f is None:
+            return
+        self.db.clear_flag(BACKUP_TEST_FLAG)
+        res = self.backup.test(s)
+        self.db.beat("backup_test", json.dumps({"result": res.status, "message": res.message[:200], "at": D.iso(now),
+                                                "target": s.pull_backup_target}))
+        self.db.audit("system", "backup_target_tested", "", {"result": res.status, "target": s.pull_backup_target,
+                                                             "requested_by": f.get("by", "")})
+
     def _submit(self, uid: str, kind: str) -> None:
         fn = (lambda: self.offboard(uid)) if kind == "offboard" else (lambda: self.runner.run(uid, kind))
         with self._lock:
@@ -315,7 +361,7 @@ class Worker:
     # ---- offboarding (SPEC §6.3) --------------------------------------
     def offboard(self, uid: str) -> None:
         u = self.db.user_full(uid)
-        if u["final_sync_requested"] and self.db.ms_credential(uid):
+        if u["final_sync_requested"] and self.db.cloud_credential(uid) and cloud.provider_enabled(u, self.settings()):
             self.db.set_state(uid, D.ACTIVE)  # transient so the runner accepts it
             try:
                 self.runner.run(uid, "bisync")

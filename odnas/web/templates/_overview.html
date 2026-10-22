@@ -1,3 +1,5 @@
+{% if google_app %}<p class="banner critical" id="google-app"><strong>All Google Drive syncs are stopped</strong> since {{ google_app.set_at|local }}: Google rejected the OAuth client (client ID/secret). Fix the client secret credential, then restart the worker.</p>{% endif %}
+{% if disabled_providers %}<p class="banner warn" id="provider-off">Turned off in Settings (users not syncing): {% for p in disabled_providers %}{{ provider_labels[p] }}{{ ', ' if not loop.last }}{% endfor %}.</p>{% endif %}
 {% if sm and sm.any %}<div class="banner warn" id="service-mode"><strong>Service mode is ON</strong> (no max-delete safety stop for covered users; never --force; deletes still go to the archive folder).
 <ul>
 {% if sm.global %}<li><strong>All users</strong> until {{ sm.global.ends_at|local }}, turned on by {{ sm.global.set_by_upn }} {{ sm.global.started_at|local }}: {{ sm.global.reason }}{% if sm.global_deletes %}. Deletes so far: {% for d in sm.global_deletes %}{{ d.upn }} OneDrive {{ d.deleted_onedrive }} / NAS {{ d.deleted_nas }}{% if not loop.last %}; {% endif %}{% endfor %}{% endif %}</li>{% endif %}

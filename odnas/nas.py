@@ -10,8 +10,10 @@ file to tmpfs; the helper reads them, mounts, and the worker shreds them in fina
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import threading
 import uuid as uuidlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -205,6 +207,83 @@ def provider_from_settings(cfg: Config, s, helper: MountHelperClient | None = No
         return SharedHomeProvider(cfg, helper, s.nas_host, s.nas_shared_template, s.nas_svc_username,
                                   s.secret("nas_svc_password"), s.nas_domain, s.nas_health_share)
     return PersonalDriveProvider(cfg, helper, s.nas_host, s.nas_share, s.nas_domain)
+
+
+# ---- backup target for one-way runs (SPEC v0.9 §9.7.3) ----------------------------------------------
+# The backup NAS share (suggested Sync-Archive on UNAS #2) is mounted through the SAME root helper and
+# sudoers line as user shares, under a reserved mount id, so no new privileged code path is added. The
+# SPEC's example path /srv/springsync/archive is therefore <mount_root>/<ARCHIVE_IDENT> (CHANGELOG).
+ARCHIVE_IDENT = "00000000-0000-4000-8000-00000000a5c1"
+TARGET_BACKUP_NAS, TARGET_SAME_SHARE = "backup_nas", "same_share"
+WRITE_MARKER = ".springsync-write-test"
+
+
+@dataclass
+class BackupResult:
+    status: str
+    root: str = ""
+    per_user: bool = True     # backup_nas: <root>/<user_id>/<stamp>; same_share: <root>/<stamp>
+    message: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status == V_OK
+
+
+class BackupTarget:
+    """Guard 3 of §9.7.2: the backup target must be reachable AND writable (a marker file is written and
+    removed) before any one-way run. SpringSync never deletes anything from the backup target."""
+
+    def __init__(self, cfg: Config, helper: MountHelperClient | None = None):
+        self.cfg, self.helper = cfg, helper or MountHelperClient(cfg)
+        self._lock = threading.Lock()
+
+    def unc(self, s) -> str:
+        return f"//{s.backup_nas_host}/{s.backup_nas_share}"
+
+    def _mount(self, s) -> BackupResult:
+        if not (s.backup_nas_host and s.backup_nas_share and s.backup_nas_username
+                and s.secret_is_set("backup_nas_password")):
+            return BackupResult(V_ERROR, message="backup NAS not configured (host, share, login)")
+        path = self.helper.mount_path(ARCHIVE_IDENT)
+        with self._lock:
+            if not os.path.ismount(path):
+                try:
+                    code, msg = self.helper.call("mount", ARCHIVE_IDENT, self.unc(s), s.backup_nas_username,
+                                                 s.secret("backup_nas_password"), s.nas_domain)
+                except ValueError as e:
+                    return BackupResult(V_ERROR, message=str(e))
+                if code != H_OK:
+                    return BackupResult(_status(code), message=f"backup NAS mount failed: {msg}"[:300])
+        return BackupResult(V_OK, path, True)
+
+    def prepare(self, s, uid: str, user_mount: str) -> BackupResult:
+        if s.pull_backup_target == TARGET_SAME_SHARE:
+            res = BackupResult(V_OK, f"{user_mount.rstrip('/')}/{self.cfg.archive_dirname}", False)
+        else:
+            res = self._mount(s)
+            if not res.ok:
+                return res
+        return self._writable(res, uid)
+
+    def test(self, s) -> BackupResult:
+        """Admin Settings 'Test' button (backup_nas only): mount + write/remove a marker at the root."""
+        if s.pull_backup_target == TARGET_SAME_SHARE:
+            return BackupResult(V_OK, message="same_share: checked on each user's share before each run")
+        res = self._mount(s)
+        return self._writable(res, None) if res.ok else res
+
+    @staticmethod
+    def _writable(res: BackupResult, uid: str | None) -> BackupResult:
+        d = Path(res.root) / uid if (uid and res.per_user) else Path(res.root)
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            m = d / WRITE_MARKER
+            m.write_text("springsync write test\n")
+            m.unlink()
+        except OSError as e:
+            return BackupResult(V_ERROR, res.root, res.per_user, f"backup target not writable ({type(e).__name__})")
+        return res
 
 
 def local_name_from_upn(upn: str) -> str:

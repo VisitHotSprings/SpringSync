@@ -1,9 +1,10 @@
 <h2>Users</h2>
-<table><tr><th>User</th><th>State</th><th>Needs attention</th><th>Last success</th><th>Last result</th><th>Next run</th><th>Fails in a row</th></tr>
+<table><tr><th>User</th><th>Cloud / direction</th><th>State</th><th>Needs attention</th><th>Last success</th><th>Last result</th><th>Next run</th><th>Fails in a row</th></tr>
 {% for u in users %}<tr>
 <td><a href="{{ base }}/users/{{ u.id }}">{{ u.upn }}</a></td>
+<td>{% set cv = cviews[u.id] %}{{ cv.cloud_side }} &middot; {{ cv.direction_label }}{% if cv.direction == 'pull_mirror' and cv.baseline_needed %} <span class="badge warn">baseline</span>{% endif %}{% if cv.requested %} <span class="badge warn">switch pending</span>{% endif %}{% if not cv.provider_enabled %} <span class="badge warn">provider off</span>{% endif %}</td>
 <td><span class="badge">{{ u.state }}</span>{% if u.service_mode_until or (sm and sm.global) %} <span class="badge warn">service mode</span>{% endif %}</td>
-<td>{% if u.state not in ('active','removed') %}{{ labels[u.state] }}{% elif u.needs_resync %}resync approval{% endif %}</td>
+<td>{% if u.state not in ('active','removed') %}{{ state_label(u.state, u.cloud_provider) }}{% elif u.needs_resync %}resync approval{% endif %}</td>
 <td>{{ u.last_success_at|local }}</td><td>{{ u.last_result or '-' }}</td><td>{{ u.next_run_at|local }}</td><td>{{ u.consecutive_failures }}</td>
-</tr>{% else %}<tr><td colspan="7">nobody connected yet</td></tr>{% endfor %}
+</tr>{% else %}<tr><td colspan="8">nobody connected yet</td></tr>{% endfor %}
 </table>

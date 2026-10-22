@@ -20,6 +20,16 @@ group_users = ""
 group_admins = ""
 group_auditors = ""
 
+[google]
+# v0.9, optional: Google Drive (My Drive) as a user's connected cloud drive (SPEC §4.3, §4.4).
+# App sign-in stays Microsoft for everyone; Google is only "Connect Google Drive" on the user's page.
+# Empty client_id = Google not configured. The client SECRET is NOT here: it is the systemd credential
+# "google-client.secret" (/etc/springsync/creds/google-client.secret.cred). Creating the Google Cloud
+# project / OAuth client needs Mark's OK and his Google admin sign-in (docs/DEPLOY.md).
+client_id = ""                 # <digits>-<id>.apps.googleusercontent.com
+allowed_domain = "hotsprings.org"
+# redirect_path = "/auth/google/callback"
+
 [nas]
 nas_host = "unas.hotsprings.local"
 nas_share = "Personal-Drive"

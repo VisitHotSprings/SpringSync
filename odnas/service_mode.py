@@ -14,6 +14,10 @@ go through without a safety abort.
 - Not applied to: onboarding-incomplete users, any run other than a scheduled `bisync` (Restore, Accept
   deletes, delta lists, resyncs, checks), users in safety_abort / critical / paused (they don't get bisync
   runs at all; an existing safety_abort is not cleared), or while nas_global_pause blocks runs.
+- v0.9 per direction (§9.5): two_way as above; pull_mirror skips the percentage stop of the counting
+  dry-run and omits the --max-delete backstop (check files, empty source, backup target and --backup-dir
+  stay); pull_copy: no effect ("no effect (Copy only)" in the picker, 0 in the summary). Never a Mirror
+  baseline or a two-way switch-back resync (until two_way_baseline_at).
 - Each window has a required reason and an end time: default 4 h, max 24 h. Re-enabling an active window
   is an "extend" (new end time, audited). It ends on its own at ends_at (stored in the DB, so a restart
   neither extends nor re-enables it); a run that started inside the window keeps its flags.
@@ -67,9 +71,18 @@ def user_window(u, now: datetime | None = None) -> dict | None:
 
 
 def active_scope(db: D.DB, u, now: datetime | None = None) -> str | None:
-    """Scope this user's next scheduled bisync runs under, or None. Onboarding-incomplete users are never
-    covered (SPEC v0.8 §9.5)."""
+    """Scope this user's next scheduled incremental runs under, or None. Onboarding-incomplete users are never
+    covered (SPEC v0.8 §9.5). v0.9 (§9.5, §6.6): a two-way user after a switch-back resync is not covered
+    until two_way_baseline_at; a Mirror user still waiting for the Mirror baseline is not covered. Copy-only
+    users are tagged (the summary lists them with 0) but nothing changes for them."""
     if not u["onboarding_completed_at"]:
+        return None
+    keys = u.keys() if hasattr(u, "keys") else u
+    direction = u["direction"] if "direction" in keys else "two_way"
+    if (direction == "two_way" and "two_way_baseline_at" in keys and not u["two_way_baseline_at"]
+            and u["direction_changed_at"]):      # only after a switch back to two-way (never-switched: v0.8 rule)
+        return None
+    if direction == "pull_mirror" and not u["mirror_baseline_ok_at"]:
         return None
     if global_window(db, now):
         return SCOPE_ALL

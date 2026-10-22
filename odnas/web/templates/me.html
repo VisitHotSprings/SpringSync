@@ -1,15 +1,20 @@
 {% extends "base.html" %}{% block body %}
 <h1>My sync status</h1>
-{% set m = {'ok':'Saved. Your NAS login works.','auth_failed':'The NAS did not accept that username or password. Nothing was saved.','unreachable':'The NAS could not be reached. Nothing was saved; try again later.','error':'Something went wrong checking the NAS login. Nothing was saved; IT can see the details.','preflight':'Scan requested; it runs within a few minutes.'} %}
+{% set m = {'ok':'Saved. Your NAS login works.','auth_failed':'The NAS did not accept that username or password. Nothing was saved.','unreachable':'The NAS could not be reached. Nothing was saved; try again later.','error':'Something went wrong checking the NAS login. Nothing was saved; IT can see the details.','preflight':'Scan requested; it runs within a few minutes.','google_connected':'Google Drive connected.'} %}
 {% if msg %}<p class="msg {{ 'err' if msg in ('auth_failed','unreachable','error') else '' }}">{{ m.get(msg, '') }}</p>{% endif %}
 <table>
-<tr><th>Status</th><td><span class="badge">{{ labels[u.state] }}</span></td></tr>
+<tr><th>Status</th><td><span class="badge">{{ state_label(u.state, cv.provider) }}</span></td></tr>
+<tr><th>Cloud</th><td>{{ cv.provider_label }}{% if not cv.provider_enabled %} (turned off by IT: not syncing){% endif %}</td></tr>
+<tr><th>Sync direction</th><td>{{ cv.direction_label }}{% if cv.requested %} (IT is switching you to {{ cv.requested_label }}; this takes effect between runs){% endif %}{% if cv.then %} (a Mirror pass runs first, then two-way){% endif %}{% if cv.is_pull %}: files come from {{ cv.cloud_side }} to the NAS; nothing on the NAS is sent back.{% endif %}
+{% if cv.warning %}<br><small>{{ cv.warning }}</small>{% endif %}
+{% if cv.provider == 'gdrive' %}<br><small>Google Docs, Sheets and Slides are {{ 'exported as Office files (read-only copies)' if cv.exporting else 'not copied to the NAS' }}.</small>{% endif %}</td></tr>
 <tr><th>Last successful sync</th><td>{{ u.last_success_at|local }}</td></tr>
 <tr><th>Last run</th><td>{{ u.last_run_at|local }} ({{ u.last_result or '-' }})</td></tr>
 <tr><th>Next run</th><td>{{ u.next_run_at|local }}</td></tr>
 <tr><th>Files that can't sync</th><td>{{ u.unsyncable_count }}</td></tr>
-<tr><th>Microsoft</th><td>{% if ms %}connected {{ ms.token_obtained_at|local }}{% else %}not connected{% endif %}
- &middot; <a href="/login">Reconnect</a></td></tr>
+<tr><th>{{ cv.cloud_side }}</th><td>{% if ms %}connected {{ ms.token_obtained_at|local }}{% if gcred %} as {{ gcred.google_email }}{% endif %}{% else %}not connected{% endif %}
+ {% if cv.provider == 'gdrive' %}{% if google_ready %}<form class="inline" method="post" action="/me/google/connect"><input type="hidden" name="csrf" value="{{ csrf }}"><button>{{ 'Reconnect Google Drive' if ms else 'Connect Google Drive' }}</button></form>{% else %}&middot; Google Drive is not available yet (IT){% endif %}
+ {% else %}&middot; <a href="/login">Reconnect</a>{% endif %}</td></tr>
 </table>
 
 {% if nas_option == 'A' %}
@@ -25,7 +30,7 @@ Your password is stored encrypted and nobody, including IT, can view it.</p>
 
 <h2>Setup progress</h2>
 <ol>
-<li>Microsoft connected: {{ 'yes' if ms else 'no' }}</li>
+<li>{{ cv.cloud_side }} connected: {{ 'yes' if ms else 'no' }}</li>
 {% if nas_option == 'A' %}<li>NAS login verified: {{ 'yes' if nas else 'no' }}</li>{% endif %}
 <li>File name check: {{ u.preflight_summary or ('running' if u.preflight_requested else 'not yet') }}
  {% if has_preflight %}&middot; <a href="/me/preflight.json">download the list (only you can see it)</a>{% endif %}
@@ -36,8 +41,8 @@ Your password is stored encrypted and nobody, including IT, can view it.</p>
 
 {% if issues %}<h2>Open issues</h2><ul>{% for i in issues %}<li>{{ i.summary }} ({{ i.opened_at|local }})</li>{% endfor %}</ul>{% endif %}
 <h2>Recent runs</h2>
-<table><tr><th>Started</th><th>Kind</th><th>Result</th><th>Copied</th><th>Deleted</th><th>Conflicts</th><th>Errors</th></tr>
-{% for r in runs %}<tr><td>{{ r.started_at|local }}</td><td>{{ r.kind }}</td><td>{{ r.result or 'running' }}</td><td>{{ r.files_copied }}</td><td>{{ r.files_deleted }}</td><td>{{ r.conflicts }}</td><td>{{ r.errors_count }}</td></tr>{% endfor %}
+<table><tr><th>Started</th><th>Kind</th><th>Result</th><th>Copied</th><th>Deleted / moved</th><th>Conflicts</th><th>Errors</th></tr>
+{% for r in runs %}<tr><td>{{ r.started_at|local }}</td><td>{{ r.op or r.kind }}</td><td>{{ r.result or 'running' }}</td><td>{{ r.files_copied }}</td><td>{{ r.files_deleted }}</td><td>{{ r.conflicts }}</td><td>{{ r.errors_count }}</td></tr>{% endfor %}
 </table>
-<p><small>To disconnect completely, ask IT to offboard you, and remove the app at myaccount.microsoft.com &rarr; Apps.</small></p>
+<p><small>To disconnect completely, ask IT to offboard you, and remove the app at {% if cv.provider == 'gdrive' %}myaccount.google.com &rarr; Security &rarr; Third-party apps{% else %}myaccount.microsoft.com &rarr; Apps{% endif %}.</small></p>
 {% endblock %}

@@ -19,6 +19,9 @@ GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 DELEGATED_SCOPES = ("Files.ReadWrite", "User.Read")  # MSAL adds openid/profile/offline_access
 RCLONE_ACCESS_SCOPES = "Files.ReadWrite offline_access"
 
+GOOGLE_CLIENT_ID_RE = re.compile(r"^[0-9]{6,20}-[a-z0-9]{10,64}\.apps\.googleusercontent\.com\Z")
+GOOGLE_SECRET_FILE = "google-client.secret"   # systemd credential google-client.secret.cred; never in the repo/DB
+
 CRED_CERT = "certificate"
 CRED_SECRET = "secret"
 TOKEN_MODE_BROKER = "broker"        # SPEC §2/§9.2: rclone refreshes via local broker with a per-run handle [T-A3]
@@ -52,6 +55,10 @@ class Config:
     group_users: str = ""        # bootstrap group object IDs; GUI settings override
     group_admins: str = ""
     group_auditors: str = ""
+    # [google] (v0.9). The OAuth client SECRET is never config: it is the credential file google-client.secret.
+    google_client_id: str = ""
+    google_allowed_domain: str = ""   # bootstrap default for the google_allowed_domain setting (SPEC §8.2)
+    google_redirect_path: str = "/auth/google/callback"
     # [paths] (empty = derived from slug)
     db_path: str = ""
     state_dir: str = ""
@@ -113,6 +120,10 @@ class Config:
     @property
     def token_url(self) -> str: return f"{self.authority}/oauth2/v2.0/token"
     @property
+    def google_redirect_uri(self) -> str: return self.base_url.rstrip("/") + self.google_redirect_path
+    @property
+    def google_configured(self) -> bool: return bool(self.google_client_id)
+    @property
     def broker_base(self) -> str: return f"http://{self.broker_host}:{self.broker_port}"
 
     # ---- secrets (never logged, never in repr) --------------------------
@@ -135,6 +146,10 @@ class Config:
             errs.append("tenant_id must be the VHS tenant GUID (single-tenant; no common/organizations)")
         if self.client_id and not GUID_RE.match(self.client_id):
             errs.append("client_id must be a GUID")
+        if self.google_client_id and not GOOGLE_CLIENT_ID_RE.match(self.google_client_id):
+            errs.append("google_client_id must look like <digits>-<id>.apps.googleusercontent.com")
+        if not self.google_redirect_path.startswith("/auth/") or self.google_redirect_path == self.redirect_path:
+            errs.append("google_redirect_path must be under /auth/ and differ from the Microsoft redirect path")
         if self.credential_type not in (CRED_CERT, CRED_SECRET):
             errs.append("credential_type must be certificate|secret")
         if self.token_mode not in (TOKEN_MODE_BROKER, TOKEN_MODE_TMPFS):
@@ -152,7 +167,7 @@ class Config:
         return self
 
 
-_SECTIONS = ("app", "entra", "paths", "nas")
+_SECTIONS = ("app", "entra", "google", "paths", "nas")
 
 
 def load_config(path: str | None = None, env: dict[str, str] | None = None) -> Config:
@@ -162,7 +177,11 @@ def load_config(path: str | None = None, env: dict[str, str] | None = None) -> C
     if path and Path(path).is_file():
         data = tomllib.loads(Path(path).read_text())
         for sec in _SECTIONS:
-            values.update(data.get(sec, {}))
+            if sec == "google":   # SPEC §8.2: [google] client_id / allowed_domain -> google_client_id / ...
+                values.update({(k if k.startswith("google_") else "google_" + k): v
+                               for k, v in data.get(sec, {}).items()})
+            else:
+                values.update(data.get(sec, {}))
     known = {f.name: f for f in fields(Config)}
     for k, v in e.items():
         if k.startswith("ODNAS_") and k != "ODNAS_CONFIG":

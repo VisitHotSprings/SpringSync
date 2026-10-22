@@ -75,6 +75,24 @@ def expiry_reminders(cfg: Config, db: D.DB, alerter: Alerter, s, today: date | N
     return e.days_left
 
 
+def google_secret_reminders(cfg: Config, alerter: Alerter, s, today: date | None = None) -> int | None:
+    """v0.9: the Google OAuth client secret has no expiry of its own; IT records a rotate-by date
+    (Settings > Google). Only checked when a Google client is configured."""
+    if not cfg.google_configured or not s.google_client_secret_expires_on:
+        return None
+    today = today or date.today()
+    left = (date.fromisoformat(s.google_client_secret_expires_on) - today).days
+    if left < 0:
+        alerter.raise_(Alert("google_secret_rotate", "high",
+                             f"Google OAuth client secret rotate-by date passed ({s.google_client_secret_expires_on})"))
+    elif left <= 30:
+        alerter.raise_(Alert("google_secret_rotate", "medium",
+                             f"Google OAuth client secret: rotate by {s.google_client_secret_expires_on} ({left} days)"))
+    else:
+        alerter.resolve(None, "google_secret_rotate")
+    return left
+
+
 def stale_refresh_tokens(db: D.DB, alerter: Alerter, now: datetime | None = None) -> int:
     """Safety net (SPEC §6.2): refresh token 80 days old with no successful refresh -> needs_reauth."""
     now = now or D.utcnow()
@@ -104,6 +122,7 @@ def run_maint(cfg: Config, db: D.DB, alerter: Alerter, probe_tls: bool = True) -
     out["pruned_logs"] = prune_logs(cfg)
     out["swept_tmp"] = sweep_runtime(cfg)
     out["credential_days_left"] = expiry_reminders(cfg, db, alerter, s)
+    out["google_secret_days_left"] = google_secret_reminders(cfg, alerter, s)
     out["stale_tokens"] = stale_refresh_tokens(db, alerter)
     free = disk_free_pct(cfg.p_state)
     if free is not None and free < 15:

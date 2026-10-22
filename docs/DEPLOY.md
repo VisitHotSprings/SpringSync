@@ -78,3 +78,60 @@ The GUI shows the running version but never triggers an update (SPEC §11.4).
   mount -t cifs //unas.hotsprings.local/Personal-Drive /srv/springsync/mnt/<uuid> \
     -o vers=3.1.1,seal,uid=springsync,gid=springsync,file_mode=0600,dir_mode=0700,nosuid,nodev,noexec,noserverino,credentials=/run/springsync/creds/<uuid>
   ```
+
+## v0.9: one-way backup target and Google Drive (manual; NOT done by install.sh)
+
+> Everything in this section **needs Mark's OK** before anyone does it. These are NAS changes and Google
+> Cloud / Google Workspace admin changes. No SpringSync code creates shares, Google projects, OAuth clients
+> or Admin-console settings, and nothing here has been done.
+
+### Sync-Archive share on the backup NAS (needs Mark's OK, through Todd) — SPEC §9.7.3, §14.20
+Needed only when Settings → Cloud → `pull_backup_target` = `backup_nas` (the default) and any user is on
+Copy only or Mirror. Until it exists, one-way runs are **skipped** (medium alert `backup_target_unavailable`);
+nothing is replaced or removed without a backup.
+1. On UNAS #2 create a share, suggested name `Sync-Archive` (`backup_nas_share`).
+2. Create a dedicated service login for it (not `svc-sync`, not a person). Read/write on this share only.
+3. Retention: a NAS-side rule (suggested 90 days, §14.20). SpringSync never deletes from it.
+4. Readers: decide who may read it (§14.20): it holds every one-way user's moved and replaced files.
+5. In Settings → Cloud enter `backup_nas_host`, `backup_nas_share`, `backup_nas_username` and
+   `backup_nas_password` (secret; replace-only), save, then press **Test backup target**. The worker mounts
+   it within 60 s and writes/removes `.springsync-write-test`; the result shows on the Settings page and in
+   the audit log (`backup_target_tested`).
+- The worker mounts it through the existing mount helper at
+  `/srv/<slug>/mnt/00000000-0000-4000-8000-00000000a5c1` (reserved id) and leaves it mounted.
+- Each run writes to `<user_id>/<YYYY-MM-DD_HHMMSS>` (UTC). Moving across NAS boxes is copy + delete, so
+  each moved file crosses the network twice (lab test T-M1 measures it).
+- Fallback without a new share: `pull_backup_target = same_share` (`.springsync-archive` in each user's
+  share, copied by the UniFi backup task).
+
+### Google Cloud project and OAuth client (needs Mark's OK; Mark's Google admin sign-in) — SPEC §4.3, T-G1
+1. In the hotsprings.org Google Cloud organisation, create an **org-owned** project (e.g. `springsync`).
+2. Enable the **Google Drive API** only.
+3. OAuth consent screen: **Internal** user type; scopes `openid`, `email`,
+   `https://www.googleapis.com/auth/drive` (Walter reviews the scope, §14.19).
+4. Credentials → OAuth client ID → **Web application**; authorised redirect URI
+   `https://sync.hotsprings.org/auth/google/callback`. No JavaScript origins.
+5. Google Admin console → Security → API controls → App access control: mark the client as **Trusted**
+   (so Drive access isn't blocked by the Workspace policy).
+6. Put the client ID in `/etc/<slug>/springsync.toml` under `[google] client_id`, and
+   `allowed_domain = "hotsprings.org"`.
+7. Store the **client secret** as an encrypted credential, never in the repo or the DB:
+   ```
+   sudo systemd-creds encrypt --name=google-client.secret - /etc/<slug>/creds/google-client.secret.cred
+   ```
+   and add a drop-in for **both** `<slug>-web` and `<slug>-worker`:
+   ```
+   # /etc/systemd/system/<slug>-worker.service.d/google.conf (same for -web)
+   [Service]
+   LoadCredentialEncrypted=google-client.secret:/etc/<slug>/creds/google-client.secret.cred
+   ```
+   The drop-in is not shipped in the units by default (no Google until Mark's OK).
+8. Record the rotate-by date in Settings → Google → `google_client_secret_expires_on`; maint raises a
+   reminder from 30 days before it.
+9. Restart web and worker. "Connect Google Drive" appears for users whose provider is Google (Settings →
+   Cloud → `gdrive_users`, or the user's admin page).
+- Rotating the secret: create the new secret in the console, re-encrypt the credential file, restart the
+  worker (this also clears the app-wide `google_app_credential` stop), confirm a Google run, then delete
+  the old secret in the console (T-G1 confirms the flow).
+- Volume/cost: new projects have a 1 TB/day egress threshold (§14.27). Seed large My Drives over several
+  nights with `resync_bwlimit`.
