@@ -7,6 +7,6 @@
 <label>Since (UTC ISO) <input type="text" name="since" value="{{ qp.get('since','') }}"></label>
 <button>Filter</button> <a href="/audit/log.csv?actor={{ qp.get('actor','')|urlencode }}&action={{ qp.get('action','')|urlencode }}&since={{ qp.get('since','')|urlencode }}">Export CSV</a></form>
 <table><tr><th>#</th><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Details</th></tr>
-{% for r in rows %}<tr><td>{{ r.seq }}</td><td>{{ r.ts|local }}</td><td>{{ r.actor }}</td><td>{{ r.action }}</td><td>{{ r.target }}</td><td><code>{{ r.details_json }}</code></td></tr>{% endfor %}
+{% for r in rows %}<tr><td>{{ r.seq }}</td><td>{{ r.ts|local }}</td><td>{{ r.actor }}</td><td>{{ r.action }}</td><td>{{ r.target }}</td><td><code>{{ r.details_json|local_text }}</code></td></tr>{% endfor %}
 </table>
 {% endblock %}

@@ -1,7 +1,7 @@
 {% extends "base.html" %}{% block body %}
 <h1>{{ u.upn }}</h1>
 <table>
-<tr><th>State</th><td>{{ state_label(u.state, cv.provider) }} {% if u.pause_reason %}({{ u.pause_reason }}){% endif %}</td></tr>
+<tr><th>State</th><td>{{ state_label(u.state, cv.provider) }} {% if u.pause_reason %}({{ u.pause_reason|local_text }}){% endif %}</td></tr>
 <tr><th>Cloud provider</th><td>{{ cv.provider_label }}{% if not cv.provider_enabled %} <span class="badge warn">provider disabled in Settings: not syncing</span>{% endif %}</td></tr>
 <tr><th>Sync direction</th><td>{{ cv.direction_label }}{% if cv.changed_at %} (since {{ cv.changed_at|local }}, by {{ cv.changed_by }}: {{ cv.reason }}){% endif %}{% if cv.requested %} <span class="badge warn">switch to {{ cv.requested_label }}{{ ' (Mirror first)' if cv.requested_mirror_first else '' }} pending</span>{% endif %}{% if cv.then %} <span class="badge warn">Mirror pass, then two-way</span>{% endif %}{% if cv.two_way_baseline_pending %} <span class="badge">two-way baseline not built yet</span>{% endif %}
 {% if cv.warning %}<br><small>{{ cv.warning }}</small>{% endif %}</td></tr>
@@ -9,8 +9,8 @@
 {% if cv.direction == 'pull_mirror' %}<tr><th>Mirror baseline</th><td>{% if not cv.baseline_needed %}ok{% elif cv.baseline_count is none %}not counted yet (Copy only runs until it is approved){% else %}{{ cv.baseline_count }} of {{ cv.baseline_total }} NAS file(s) would be moved to the backup target (counted {{ cv.baseline_counted_at|local }}){% if cv.baseline_approved_by %}; approved {{ cv.baseline_approved_count }} by {{ cv.baseline_approved_by }}{% endif %}{% endif %}{% if cv.baseline_state %} <span class="badge">{{ cv.baseline_state }}</span>{% endif %}</td></tr>{% endif %}
 <tr><th>Service-mode effect</th><td>{{ cv.service_mode_effect }}</td></tr>
 <tr><th>Needs resync</th><td>{{ 'yes' if u.needs_resync else 'no' }}{% if u.resync_approved_by %}, approved by {{ u.resync_approved_by }} {{ u.resync_approved_at|local }}{% endif %}</td></tr>
-<tr><th>Dry run</th><td>{{ u.dryrun_summary or '-' }} {{ u.dryrun_ok_at|local if u.dryrun_ok_at else '' }}</td></tr>
-<tr><th>Preflight</th><td>{{ u.preflight_summary or '-' }}</td></tr>
+<tr><th>Dry run</th><td>{{ (u.dryrun_summary or '-')|local_text }} {{ u.dryrun_ok_at|local if u.dryrun_ok_at else '' }}</td></tr>
+<tr><th>Preflight</th><td>{{ (u.preflight_summary or '-')|local_text }}</td></tr>
 <tr><th>{{ cv.cloud_side }} credential</th><td>{% if ms %}stored; last refresh {{ ms.last_refresh_at|local }}{% if ms.last_refresh_error %}; last error {{ ms.last_refresh_error }}{% endif %}{% else %}none{% endif %}</td></tr>
 <tr><th>NAS credential</th><td>{% if nas %}stored (option {{ nas.provider }}); verified {{ nas.verified_at|local }}; failures {{ nas.failure_count }}{% else %}none{% endif %}</td></tr>
 <tr><th>Last success / check</th><td>{{ u.last_success_at|local }} / {{ u.last_check_at|local }}</td></tr>
@@ -29,7 +29,7 @@
 <table>
 <tr><th>Blocked</th><td>{{ safety.at|local }}: {% if safety.abort.check == 'max_delete' %}too many deletes (limit {{ safety.abort.pct }}%){% for side, c in safety.abort_sides|dictsort %}; {{ side }} ({{ safety.cloud if side == 'Path1' else 'NAS' }}) {{ c.deletes }} of {{ c.total }}{% else %}; {{ safety.abort.side }} {{ safety.abort.deletes }} of {{ safety.abort.total }}{% endfor %}{% elif safety.abort.check == 'empty_source' %}the {{ safety.cloud }} listing is empty while the NAS has {{ safety.abort.total }} file(s) (mirror deletes would empty the NAS){% else %}all files were changed on {{ safety.cloud if safety.abort.side == 'Path1' else 'the NAS' }}{% endif %}{% if safety.one_way %} (one-way pull){% endif %}</td></tr>
 {% if safety.del_p1 is not none %}<tr><th>Deletions (dry run)</th><td>Path1 ({{ safety.cloud }}{{ ', deleted in the cloud, removed from the NAS' if safety.one_way else '' }}): {{ safety.del_p1 }} &middot; Path2 (NAS): {{ safety.del_p2 }}</td></tr>{% endif %}
-<tr><th>Dry-run delta</th><td>{% if safety.delta_pending %}being prepared (read-only dry run){% else %}{{ safety.delta_summary or '-' }} {{ safety.delta_at|local if safety.delta_at else '' }}{% endif %}</td></tr>
+<tr><th>Dry-run delta</th><td>{% if safety.delta_pending %}being prepared (read-only dry run){% else %}{{ (safety.delta_summary or '-')|local_text }} {{ safety.delta_at|local if safety.delta_at else '' }}{% endif %}</td></tr>
 <tr><th>Decision</th><td>{% if safety.action == 'restore' %}Restore ({{ 'tonight, in the resync window' if safety.restore_when == 'tonight' else 'next slot' }}) approved by {{ safety.action_by }} {{ safety.action_at|local }}{% if safety.requeued %}; automatically re-queued for tonight after hitting the run-time limit{% endif %}{% elif safety.action == 'accept_deletes' %}Accept deletes (Path1 {{ safety.approved_p1 }}, Path2 {{ safety.approved_p2 }}) approved by {{ safety.action_by }} {{ safety.action_at|local }}; expires {{ safety.expires_at|local }}{% else %}waiting for IT{% endif %}</td></tr>
 <tr><th>Accept-deletes approval</th><td>{{ safety.accept_state or '-' }}{% if safety.accept_state_at and safety.accept_state != 'pending' %} ({{ safety.accept_state_at|local }}){% endif %}</td></tr>
 {% if safety.onboarding %}<tr><th>Onboarding</th><td>incomplete{% if safety.no_delta %} (stopped on the onboarding dry run; no delta list is possible yet){% endif %}. Restore re-runs the onboarding resync.</td></tr>{% endif %}
@@ -98,9 +98,9 @@
 <button>Offboard (erase stored credentials)</button></form>
 <small>Files on the NAS and in {{ cv.cloud_side }} are not touched.</small></fieldset>
 {% endif %}
-<h2>Open issues</h2><ul>{% for i in issues %}<li>{{ i.type }} ({{ i.severity }}): {{ i.summary }}</li>{% else %}<li>none</li>{% endfor %}</ul>
+<h2>Open issues</h2><ul>{% for i in issues %}<li>{{ i.type }} ({{ i.severity }}): {{ i.summary|local_text }}</li>{% else %}<li>none</li>{% endfor %}</ul>
 <h2>Runs</h2>
 <table><tr><th>Started</th><th>Ended</th><th>Kind</th><th>Exit</th><th>Result</th><th>Copied</th><th>Deleted / moved</th><th>Bytes</th><th>Conflicts</th><th>Errors</th><th>Detail</th></tr>
-{% for r in runs %}<tr><td>{{ r.started_at|local }}</td><td>{{ r.ended_at|local }}</td><td>{{ r.kind }}{% if r.op %} <small>({{ r.op }})</small>{% endif %}{% if r.provider == 'gdrive' %} <small>Google</small>{% endif %}{% if r.service_mode %} <span class="badge warn">service mode ({{ r.service_mode }})</span>{% endif %}</td><td>{{ r.exit_code }}</td><td>{{ r.result }}</td><td>{{ r.files_copied }}</td><td>{{ r.files_deleted }}</td><td>{{ r.bytes }}</td><td>{{ r.conflicts }}</td><td>{{ r.errors_count }}</td><td>{{ r.detail }}</td></tr>{% endfor %}
+{% for r in runs %}<tr><td>{{ r.started_at|local }}</td><td>{{ r.ended_at|local }}</td><td>{{ r.kind }}{% if r.op %} <small>({{ r.op }})</small>{% endif %}{% if r.provider == 'gdrive' %} <small>Google</small>{% endif %}{% if r.service_mode %} <span class="badge warn">service mode ({{ r.service_mode }})</span>{% endif %}</td><td>{{ r.exit_code }}</td><td>{{ r.result }}</td><td>{{ r.files_copied }}</td><td>{{ r.files_deleted }}</td><td>{{ r.bytes }}</td><td>{{ r.conflicts }}</td><td>{{ r.errors_count }}</td><td>{{ r.detail|local_text }}</td></tr>{% endfor %}
 </table>
 {% endblock %}

@@ -35,7 +35,8 @@ from odnas.db import pack, unpack
 from odnas.entra import EntraClient
 from odnas.nas import V_ERROR, friendly, local_name_from_upn
 from odnas.runner import delete_count, delete_counts, delta_file
-from odnas.scheduler import LOCAL_TZ
+from odnas.scheduler import LOCAL_TZ  # noqa: F401  (kept for callers)
+from odnas.timefmt import display_time, localize_text
 from odnas.status import credential_expiry, disk_free_pct, worker_alive
 
 log = logging.getLogger("odnas.web")
@@ -92,9 +93,8 @@ def svc_test_status(db: D.DB) -> dict | None:
 
 
 def local_time(v: str | None) -> str:
-    if not v:
-        return "never"
-    return D.parse_iso(v).astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M %Z")
+    """v0.9.1: every time on a page is Central (America/Chicago) with its zone label."""
+    return display_time(v)
 
 
 def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
@@ -102,6 +102,7 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
     app = FastAPI(title=cfg.product_name, docs_url=None, redoc_url=None, openapi_url=None)
     templates = Jinja2Templates(directory=str(HERE / "templates"))
     templates.env.filters["local"] = local_time
+    templates.env.filters["local_text"] = localize_text    # embedded UTC timestamps in free text
     templates.env.globals.update(product=cfg.product_name, version=__version__, labels=D.STATE_LABELS,
                                  state_label=D.state_label, provider_labels=cloud.PROVIDER_LABELS,
                                  direction_labels=cloud.DIRECTION_LABELS)

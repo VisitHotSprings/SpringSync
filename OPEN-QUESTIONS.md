@@ -175,22 +175,32 @@ Also not covered by local tests:
 17. **Option B "mounted persistently"** is per-run idempotent mounts. A boot-time mount unit is not built.
 
 ## E. v0.9 build findings and deviations (Dex)
-1. **`sync_runs.kind` was not rebuilt.** SPEC v0.9 adds run kinds; changing the CHECK constraint means a
+1. ~~**`sync_runs.kind` was not rebuilt.**~~ **Approved by Reid (v0.9.1).** SPEC v0.9 adds run kinds; changing the CHECK constraint means a
    table rebuild, which the additive-only rule forbids. The new kinds are in the new `sync_runs.op` column
    (`bisync`, `pull_count`, `pull_copy`, `pull_mirror`); `kind` keeps its lifecycle meaning (dryrun,
    resync, bisync, delta, force, check). OK, or should a later release do the rebuild?
-2. **Backup NAS mount point** is `/srv/<slug>/mnt/<reserved id>` through the existing helper, not
+2. ~~**Backup NAS mount point**~~ **Approved by Reid (v0.9.1).** is `/srv/<slug>/mnt/<reserved id>` through the existing helper, not
    `/srv/springsync/archive` as in the §9.7.3 example. It stays mounted between runs. OK?
 3. **Upgrade from 0.8 trips `filters_changed` once** because the pinned local-encoding string is part of the
    baseline digest. Every two-way user needs one approved resync after the upgrade (Mirror users recount
-   their baseline). Intended, but it's 77 approvals: should there be a bulk approve?
-4. **Copy only has no pre-count**, and the all-files-changed check does not apply to pull runs (the SPEC's
+   their baseline). Intended, but it's up to 77 one-at-a-time approvals. **Bulk approve is NOT built:
+   Mark hasn't decided.** Reid's proposal, for Mark:
+   - bulk approve only users whose test run (the dry run before the resync) shows **no deletes and no
+     conflicts** on either side;
+   - everyone else is approved one at a time, as now (review, then **Approve initial sync / resync**);
+   - (Dex's notes for when it's built: the bulk action would re-check each user's counts at click time,
+     list the users it approved and skipped, audit one entry per user, and stay IT-admin only.)
+4. ~~**Copy only has no pre-count**~~ **Approved by Reid (v0.9.1):** Copy only keeps exactly guards 2
+   and 3., and the all-files-changed check does not apply to pull runs (the SPEC's
    §9.7.2 guards are for Mirror). The brief said "keep the checks"; confirm Copy only is fine with guards 2
    and 3 only (its replacements always go to the backup target).
 5. **Mirror backstop:** the real run's `--max-delete N` can move up to N files before it trips (exit 7);
    those files are already in the backup folder. Integration-tested on v1.75.2.
-6. **Mirror under service mode** has no % stop and no backstop; only the empty-source, check-file and
-   backup guards remain (§9.5). Same risk as two-way service mode (§D.2 / §14.15).
+6. ~~**Mirror under service mode** has no % stop and no backstop~~ **Changed in v0.9.1 (Reid):** service
+   mode does not loosen Mirror at all. Mirror keeps the percentage stop and the `--max-delete` backstop in
+   service mode; its runs are only tagged for the end-of-window summary. A real Mirror command can't be
+   built without the backstop. For a planned large Mirror cleanup, use **Accept deletes** on the safety
+   stop (exact count, typed UPN, 24 h).
 7. **Mirror while waiting for the baseline** runs Copy only (never deletes), so cloud changes keep arriving.
 8. **Switching back to two-way without "Mirror first"** uploads every NAS-only file to the cloud on the
    onboarding resync. The default from Copy only is Mirror first; from Mirror it's not needed.
@@ -204,7 +214,8 @@ Also not covered by local tests:
 12. **App-wide Google client failure** (`invalid_client`) stops all Google users until the worker restarts
     (one high alert, admin/auditor banner). There is no "clear" button on purpose (the secret is a file).
 13. **T-G2 (broker refresh for rclone `drive`)** is untested; the tmpfs-config fallback is wired for Google.
-14. **Backup stamps are UTC** (`YYYY-MM-DD_HHMMSS`), not Central time.
+14. ~~**Backup stamps are UTC**~~ **Approved by Reid (v0.9.1)**; every time *shown* (pages, admin,
+    auditor, alerts) is Central (America/Chicago) with CST/CDT. Backup stamps are UTC (`YYYY-MM-DD_HHMMSS`), not Central time.
 
 ## F. SPEC v0.9 §14.19–§14.27 (open; defaults as built)
 | SPEC | Question | Who | Built default |
@@ -218,3 +229,15 @@ Also not covered by local tests:
 | §14.25 | Windows NAS access Option A vs. B (error 1219); recommendation B; T-W4 | Mark | Not in scope (v0.10). |
 | §14.26 | Windows host: machine with TPM 2.0 + UPS, Intune ring, restart window (Sun 03:00–05:00 CT), BitLocker key escrow, remote management | Mark, Margaret | Not in scope (v0.10). |
 | §14.27 | Google data volume / API cost (1 TB/day egress threshold); Dec 2026 move to M365 may make Google short-term | Mark | No code limit; use `resync_bwlimit` and seed over several nights; Copy only is the final Google → NAS pull. |
+
+## G. Notes for SPEC.md (for Reid; SPEC.md not edited by Dex)
+- **§9.5 (service mode, per direction) and §9.7.2 step 4–5:** replace the v0.9 Mirror line with: "Mirror:
+  no effect. Service mode never loosens Mirror: the counting dry-run's percentage stop and the real run's
+  `--max-delete floor(total × pct / 100)` backstop both apply; Mirror runs are only tagged for the summary.
+  Large planned Mirror deletes go through Accept deletes." (Built in v0.9.1.)
+- **§6.5 / §10 (display):** "All times shown to people (pages for users, admins and auditors; alert and
+  issue text; alert mail) are Central (America/Chicago) with the CST/CDT label. Stored times, the audit
+  chain, logs and backup folder names (`YYYY-MM-DD_HHMMSS`) stay UTC." (Built in v0.9.1.)
+- **§13 / §12.2:** T-G2 must pass on the Ubuntu test host before any real Google user is connected
+  (docs/DEPLOY.md checklist).
+- **§14 (new):** bulk approve for the post-upgrade resyncs (§E.3), Reid's proposal, Mark to decide.

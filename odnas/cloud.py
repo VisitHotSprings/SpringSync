@@ -107,7 +107,7 @@ def baseline_approved(u, now) -> bool:
 
 def service_mode_effect(u) -> str:
     return {TWO_WAY: "--max-delete 100 on scheduled bisync runs",
-            PULL_MIRROR: "no percentage stop and no --max-delete backstop (other guards stay on)",
+            PULL_MIRROR: "no effect (Mirror keeps its percentage stop and --max-delete backstop)",
             PULL_COPY: "no effect (Copy only)"}[direction(u)]
 
 

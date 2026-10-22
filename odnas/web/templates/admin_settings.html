@@ -5,7 +5,7 @@
 {% elif svc_test and svc_test.state == 'ok' %}<p class="banner ok" id="svc-test">New svc-sync password: test mount OK ({{ svc_test.at|local }}).{% if not nas_pause %} NAS syncing has resumed.{% endif %}</p>
 {% elif svc_test and svc_test.state == 'rejected' %}<p class="banner critical" id="svc-test">New svc-sync password: <strong>rejected</strong> by the NAS ({{ svc_test.at|local }}). It will not be retried; enter the correct password.</p>
 {% endif %}
-{% if nas_pause %}<p class="banner critical"><strong>All NAS syncs are paused</strong> since {{ nas_pause.set_at|local }}: {{ nas_pause.reason }}. Save the correct svc-sync password below; the worker then runs a test mount within 60 s and, if it succeeds, resumes syncing (audited). A rejected password is not retried.</p>{% endif %}
+{% if nas_pause %}<p class="banner critical"><strong>All NAS syncs are paused</strong> since {{ nas_pause.set_at|local }}: {{ nas_pause.reason|local_text }}. Save the correct svc-sync password below; the worker then runs a test mount within 60 s and, if it succeeds, resumes syncing (audited). A rejected password is not retried.</p>{% endif %}
 {% if msg %}<p class="msg">{{ msg }}</p>{% endif %}{% if err %}<p class="msg err">{{ err }}</p>{% endif %}
 <p><small>Changes apply on the worker's next tick (within 60 s). Every change is audited. Secret fields can only be replaced, never viewed.
 Email delivery is disabled in v0.1 (open decision: alert mail path). Alerts show on the admin page.</small></p>
@@ -26,7 +26,7 @@ Email delivery is disabled in v0.1 (open decision: alert mail path). Alerts show
 
 <fieldset><legend>Backup target for one-way runs (v0.9)</legend>
 <p>{{ 'Backup NAS share' if s.pull_backup_target == 'backup_nas' else 'Same share (.springsync-archive in each home folder)' }}{% if s.pull_backup_target == 'backup_nas' %}: \\{{ s.backup_nas_host or '?' }}\{{ s.backup_nas_share }}{% endif %}.
-{% if backup_test %}Last test {{ backup_test.at|local }}: <strong>{{ backup_test.result }}</strong>{% if backup_test.message %} ({{ backup_test.message }}){% endif %}.{% else %}Not tested yet.{% endif %}
+{% if backup_test %}Last test {{ backup_test.at|local }}: <strong>{{ backup_test.result }}</strong>{% if backup_test.message %} ({{ backup_test.message|local_text }}){% endif %}.{% else %}Not tested yet.{% endif %}
 <br><small>The backup NAS share needs Mark's OK before use. While the target is unavailable, one-way runs are skipped (nothing is replaced or removed without a backup).</small></p>
 <form method="post" action="/admin/settings/backup-test"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Test backup target</button></form></fieldset>
 {% if google_configured %}<p><small>Google Drive: OAuth client configured.</small></p>{% else %}<p><small>Google Drive: no OAuth client configured (needs Mark's OK, see DEPLOY.md); "Connect Google Drive" is hidden.</small></p>{% endif %}

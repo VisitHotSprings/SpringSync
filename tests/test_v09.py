@@ -477,15 +477,62 @@ def test_empty_cloud_listing_stops_mirror_even_in_service_mode(pw, db, kr):
     assert json.loads(db.user_full(uid)["safety_abort_json"])["check"] == "empty_source"
 
 
-def test_service_mode_mirror_omits_max_delete(pw, db, kr):
+@pytest.mark.smoke
+@pytest.mark.parametrize("scope", ["user", "all"])
+def test_service_mode_keeps_the_mirror_percentage_stop(pw, db, kr, scope):
+    """v0.9.1 (Reid): service mode must not loosen Mirror at all."""
     from odnas import service_mode as SM
-    proc = PullProc(combined=combined(same=50, nas_only=50))
+    proc = PullProc(combined=combined(same=50, nas_only=50))     # 50% > 10%
+    w = pw(proc)
+    uid = ok_mirror(db, kr)
+    if scope == "user":
+        SM.enable_user(db, Alerter(db), uid, "m", "mark@hotsprings.org", 4, "cleanup")
+    else:
+        SM.enable_all(db, Alerter(db), "m", "mark@hotsprings.org", 4, "cleanup")
+    assert SM.active_scope(db, db.user_full(uid)) == scope
+    assert w.runner.run(uid, "bisync").result == "safety_abort"
+    assert not [c for c in pulls(proc, "sync") if "--dry-run" not in c]          # nothing moved
+    assert json.loads(db.user_full(uid)["safety_abort_json"])["check"] == "max_delete"
+
+
+@pytest.mark.smoke
+def test_service_mode_keeps_the_mirror_backstop(pw, db, kr):
+    from odnas import service_mode as SM
+    proc = PullProc(combined=combined(same=95, nas_only=5))
     w = pw(proc)
     uid = ok_mirror(db, kr)
     SM.enable_user(db, Alerter(db), uid, "m", "mark@hotsprings.org", 4, "cleanup")
     assert w.runner.run(uid, "bisync").result == "ok"
     real = [c for c in pulls(proc, "sync") if "--dry-run" not in c][-1]
-    assert "--max-delete" not in real
+    assert flag(real, "--max-delete") == "10"            # same floor(100 * 10%) as outside service mode
+    r = db.one("SELECT service_mode FROM sync_runs WHERE user_id=? AND op='pull_mirror' ORDER BY id DESC", (uid,))
+    assert r["service_mode"] == "user"                   # tagged for the end summary, nothing more
+
+
+def test_service_mode_backstop_trip_is_still_a_safety_abort(pw, db, kr):
+    from odnas import service_mode as SM
+    proc = PullProc(combined=combined(same=95, nas_only=5), exit_codes={"sync": 7},
+                    log_lines=[{"level": "error", "msg": "--max-delete threshold reached"}])
+    w = pw(proc)
+    uid = ok_mirror(db, kr)
+    SM.enable_user(db, Alerter(db), uid, "m", "mark@hotsprings.org", 4, "cleanup")
+    assert w.runner.run(uid, "bisync").result == "safety_abort"
+
+
+def test_real_mirror_command_cannot_be_built_without_the_backstop(cfg):
+    from odnas.bisync import JobPaths
+    from odnas.pull import build_pull, evaluate
+    import inspect
+    jp = JobPaths("0b6c3a52-6d43-4c55-9d2b-6a1c9e1f0a11", 1, "/dev/null", "/srv/x/mnt/u")
+    with pytest.raises(ValueError):
+        build_pull(cfg, jp, op="sync", backup="/srv/b/u/s", log_file="/tmp/l")
+    assert "service_mode" not in inspect.signature(evaluate).parameters
+
+
+def test_service_mode_picker_says_mirror_is_unaffected(db, kr):
+    uid = ok_mirror(db, kr)
+    assert cloud.service_mode_effect(db.user_full(uid)).startswith("no effect")
+    assert "--max-delete 100" in cloud.service_mode_effect(db.user_full(seed_user(db, kr, upn="t@hotsprings.org")))
 
 
 def test_missing_cloud_check_file_is_critical(pw, db, kr):
@@ -632,3 +679,81 @@ def test_admin_and_auditor_banners_for_google_flag_and_disabled_provider(admin, 
     for c, path in ((mark, "/admin"), (walter, "/audit")):
         page = c.get(path).text
         assert 'id="google-app"' in page and 'id="provider-off"' in page
+
+
+# ---- v0.9.1: every displayed time is Central; backup folder names stay UTC ------------------------
+
+from odnas.timefmt import ISO_RE, display_time, localize_text  # noqa: E402
+
+
+def test_display_time_is_central_with_zone_label():
+    assert display_time("2026-07-01T17:30:00+00:00") == "2026-07-01 12:30 CDT"      # summer, UTC-5
+    assert display_time("2026-12-01T17:30:00Z") == "2026-12-01 11:30 CST"           # winter, UTC-6
+    assert display_time("2026-11-01T06:30:00+00:00") == "2026-11-01 01:30 CDT"      # DST ends at 07:00 UTC
+    assert display_time("2026-11-01T07:30:00+00:00") == "2026-11-01 01:30 CST"
+    assert display_time(None) == "never" and display_time("garbage") == "garbage"
+
+
+def test_localize_text_rewrites_embedded_utc_timestamps():
+    s = localize_text("ends_at 2026-10-22T04:28:00.123456+00:00, day 2026-10-22 kept")
+    assert s == "ends_at 2026-10-21 23:28 CDT, day 2026-10-22 kept" and not ISO_RE.search(s)
+
+
+@pytest.mark.smoke
+def test_alerts_show_central_time(db, kr):
+    from odnas import service_mode as SM
+    uid = seed_user(db, kr)
+    SM.enable_user(db, Alerter(db), uid, "m", "mark@hotsprings.org", 4, "cleanup")
+    SM.enable_all(db, Alerter(db), "m", "mark@hotsprings.org", 4, "cleanup")
+    from odnas.notify import Alert
+    Alerter(db).raise_(Alert("x_test", "low", "since 2026-10-22T04:28:00+00:00", uid))
+    sums = [i["summary"] for i in db.open_issues()]
+    assert sums and all(not ISO_RE.search(s) for s in sums)
+    assert any("since 2026-10-21 23:28 CDT" in s for s in sums)
+    assert sum(1 for s in sums if re.search(r"until \d{4}-\d\d-\d\d \d\d:\d\d C[DS]T", s)) == 2
+
+
+@pytest.mark.smoke
+def test_no_utc_timestamps_on_any_page(admin, db, kr, gapp, entra):
+    """Users, admins and auditors only ever see Central time (stored values stay UTC)."""
+    from odnas import service_mode as SM
+    a, mark, tok, walter = admin
+    uid = seed_user(db, kr, last_success_at="2026-10-22T04:28:00+00:00", next_run_at="2026-10-22T05:00:00+00:00")
+    rid = db.start_run(uid, "bisync", "")
+    db.finish_run(rid, exit_code=0, result="ok", detail="pre-check at 2026-10-22T04:20:00+00:00")
+    db.update_profile(uid, dryrun_summary="dry run 2026-10-22T04:00:00Z ok", safety_delta_at="2026-10-22T04:10:00+00:00")
+    SM.enable_user(db, Alerter(db), uid, "m", "mark@hotsprings.org", 4, "cleanup")
+    db.beat("backup_test", json.dumps({"result": "error", "message": "x", "at": "2026-10-22T04:28:00+00:00"}))
+    me = login(a, entra, oid="b", upn="bob@hotsprings.org")
+    bob = db.user_by_oid("b")["id"]
+    db.update_profile(bob, last_success_at="2026-10-22T04:28:00+00:00", last_run_at="2026-10-22T04:27:00+00:00")
+    rb = db.start_run(bob, "dryrun", "")
+    db.finish_run(rb, exit_code=0, result="ok", detail="x")
+    pages = [(mark, "/admin"), (mark, f"/admin/users/{uid}"), (mark, "/admin/settings"),
+             (walter, "/audit"), (walter, f"/audit/users/{uid}"), (walter, "/audit/log"), (me, "/me")]
+    for c, path in pages:
+        r = c.get(path)
+        assert r.status_code == 200, path
+        assert not ISO_RE.search(r.text), (path, ISO_RE.search(r.text).group(0))
+    page = mark.get(f"/admin/users/{uid}").text
+    assert "2026-10-21 23:28 CDT" in page and "2026-10-21 23:20 CDT" in page       # last success, run detail
+    assert "2026-10-21 23:28 CDT" in mark.get("/admin/settings").text              # backup test result
+    assert "2026-10-21 23:28 CDT" in me.get("/me").text                            # the user's own page
+
+
+def test_backup_folder_names_stay_utc(pw, db, kr):
+    from datetime import datetime, timezone
+    proc = PullProc()
+    w = pw(proc)
+    uid = seed_user(db, kr, direction="pull_copy")
+    w.runner.run(uid, "bisync")
+    stamp = flag(pulls(proc)[0], "--backup-dir").rsplit("/", 1)[-1]
+    t = datetime.strptime(stamp, "%Y-%m-%d_%H%M%S").replace(tzinfo=timezone.utc)
+    assert abs((datetime.now(timezone.utc) - t).total_seconds()) < 120          # UTC, not Central (5-6 h off)
+
+
+def test_deploy_checklist_requires_t_g2_before_real_google_users():
+    t = (ROOT / "docs" / "DEPLOY.md").read_text()
+    assert "## Ubuntu test-host checklist" in t
+    assert re.search(r"\*\*T-G2[^|]*\*\* \| \*\*any real Google user is connected\*\*", t)
+    assert "Do not add any real Google user" in t

@@ -11,7 +11,10 @@ import logging
 from dataclasses import dataclass
 from typing import Protocol
 
+from dataclasses import replace
+
 from odnas.db import DB
+from odnas.timefmt import localize_text
 
 log = logging.getLogger("odnas.alerts")
 
@@ -51,6 +54,8 @@ class Alerter:
         self.db, self.notifier = db, notifier or NullNotifier()
 
     def raise_(self, alert: Alert, recipients: list[str] | None = None) -> bool:
+        # v0.9.1: alert text people read (issue list, mail) shows Central time, never raw UTC
+        alert = replace(alert, summary=localize_text(alert.summary))
         new = self.db.open_issue(alert.user_id, alert.type, alert.severity, alert.summary)
         if new:
             self.db.audit("system", "issue_opened", alert.user_id or "", {"type": alert.type, "severity": alert.severity})

@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.9.1 (unreleased, lab build, 2026-10-21). Reid's review of 0.9.0
+Reid approved the 0.9.0 deviations: the `sync_runs.op` column, the backup NAS mount path, Copy only with
+guards 2 and 3 only, and UTC backup folder names. Nothing live; no schema change (no migration).
+
+### Changed: service mode never loosens Mirror (Reid)
+- **Mirror in service mode keeps BOTH the percentage stop and the `--max-delete` backstop.** 0.9.0 skipped
+  both; that is reverted. The counting dry-run's limit check (`pull.evaluate`) no longer takes a
+  service-mode argument at all, and the real run always gets `--max-delete floor(total × pct / 100)`.
+- `pull.build_pull` refuses to build a real Mirror (`sync`) command without `--max-delete`, so no code path
+  can drop the backstop.
+- Mirror runs in a service-mode window are still **tagged** (`sync_runs.service_mode`) so they show in the
+  end-of-window summary; nothing else changes for them. The service-mode picker says "no effect (Mirror
+  keeps its percentage stop and --max-delete backstop)".
+- Two-way service mode (`--max-delete 100`) and Copy only (no effect) are unchanged.
+- Large planned Mirror deletes go through the safety stop's **Accept deletes** (exact count, typed UPN).
+- Tests: per-user and all-users windows both stop at the percentage limit with nothing moved; the backstop
+  is the same N as outside service mode; an exit-7 backstop trip in service mode is a safety abort; a real
+  Mirror command can't be built without the backstop.
+- Spec note for §9.5 / §9.7.2 in OPEN-QUESTIONS.md §G (SPEC.md itself is Reid's; not edited).
+
+### Changed: every time shown to people is Central time (Reid)
+- New `odnas/timefmt.py`: `display_time` (UTC ISO → `YYYY-MM-DD HH:MM CST/CDT`, America/Chicago, DST
+  aware) and `localize_text` (rewrites UTC timestamps embedded in free text).
+- **Pages** (user, admin, auditor, audit log): every time uses the `local` filter; free text that can carry
+  a timestamp (issue/alert summaries, run details, dry-run/preflight/delta summaries, pause reasons, the
+  backup-test message, audit `details_json`) goes through the new `local_text` filter.
+- **Alerts:** `Alerter.raise_` converts timestamps in the summary before it is stored or handed to the
+  notifier; service-mode "ON until …" alerts use Central time directly.
+- **Unchanged, by design:** stored values, the audit hash chain, logs, CLI/JSON output and backup folder
+  names (`<user_id>/<YYYY-MM-DD_HHMMSS>`) stay UTC.
+- Tests: CDT/CST and the DST change-over; embedded timestamps; alert text; no UTC ISO timestamp on any user,
+  admin, auditor or audit-log page; backup folder stamps are UTC.
+
+### Docs
+- OPEN-QUESTIONS.md: Reid's approvals recorded; **bulk approve is not built** (Mark hasn't decided);
+  Reid's proposal recorded (bulk approve only users whose test run shows no deletes and no conflicts;
+  everyone else one at a time). New §G spec notes for Reid.
+- docs/DEPLOY.md: new **Ubuntu test-host checklist**; **T-G2 (Google token refresh through the broker) is
+  required before any real Google user is connected**, with the six pass steps and the tmpfs fallback.
+- Version 0.9.1 (User-Agent stays `…|SpringSync/0.9`).
+
 ## 0.9.0 (unreleased, lab build, 2026-10-21). Follows SPEC.md v0.9 (§4.3, §4.4, §6.6, §9.6–§9.8, §13.1)
 Built in the §13.1 order: one-way pull first (works with OneDrive), then Google Drive. No Windows port (v0.10).
 Nothing here touched Microsoft, Google, the NAS, Entra, Google Admin or DNS; all tests use fakes or local paths.
@@ -46,7 +87,7 @@ Nothing here touched Microsoft, Google, the NAS, Entra, Google Admin or DNS; all
     to the backup target instead of being uploaded; untick to upload them;
   - a switch for a paused / needs-reauth / blocked / NAS-auth-failed user waits; a switch out of
     `safety_abort` / `critical` clears the stop and its approvals (audited `direction_switch_cleared_pending`).
-- **Service mode per direction:** two-way unchanged (`--max-delete 100`); Mirror: no % stop and no
+- **Service mode per direction** (*Mirror part reverted in 0.9.1: Mirror keeps both checks*): two-way unchanged (`--max-delete 100`); Mirror: no % stop and no
   `--max-delete` backstop (empty-source, check-file and backup guards stay); Copy only: no effect.
   The service-mode picker shows the effect per user.
 

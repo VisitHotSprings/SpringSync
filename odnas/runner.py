@@ -617,7 +617,8 @@ class JobRunner:
                 c, oc, code = count(backup)
                 if oc is not None:
                     return finish(oc, exit_code=code)
-                sa = pull.evaluate(c, pct=pct, service_mode=bool(sm), path=f"{jp.remote}:")
+                # v0.9.1 (Reid): service mode does NOT loosen Mirror; the run is only tagged (sm) for the summary
+                sa = pull.evaluate(c, pct=pct, path=f"{jp.remote}:")
                 if sa is not None:
                     sa.cloud = label
                     doc = store_delta(c)
@@ -627,7 +628,7 @@ class JobRunner:
                                                     "Admin: Accept deletes, Switch to Copy only, or Retry",
                                           safety=sa), delta_ready=True)
                 op = "sync"
-                maxdel = None if sm else pull.max_delete_allowed(c.dest_total, pct)
+                maxdel = pull.max_delete_allowed(c.dest_total, pct)   # always the backstop, service mode or not
                 plan_total = c.dest_total
             # kind resync (not a Mirror onboarding baseline), or bisync for Copy only / a Mirror user still
             # waiting for the baseline: rclone copy (never deletes)

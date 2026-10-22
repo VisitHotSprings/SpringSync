@@ -14,10 +14,10 @@ go through without a safety abort.
 - Not applied to: onboarding-incomplete users, any run other than a scheduled `bisync` (Restore, Accept
   deletes, delta lists, resyncs, checks), users in safety_abort / critical / paused (they don't get bisync
   runs at all; an existing safety_abort is not cleared), or while nas_global_pause blocks runs.
-- v0.9 per direction (§9.5): two_way as above; pull_mirror skips the percentage stop of the counting
-  dry-run and omits the --max-delete backstop (check files, empty source, backup target and --backup-dir
-  stay); pull_copy: no effect ("no effect (Copy only)" in the picker, 0 in the summary). Never a Mirror
-  baseline or a two-way switch-back resync (until two_way_baseline_at).
+- v0.9 per direction (§9.5): two_way as above. v0.9.1 (Reid): service mode does NOT loosen Mirror at all:
+  pull_mirror keeps the percentage stop of the counting dry-run AND the --max-delete backstop (plus check
+  files, empty source, backup target, --backup-dir); its runs are only tagged for the end summary.
+  pull_copy: no effect. Never a Mirror baseline or a two-way switch-back resync (until two_way_baseline_at).
 - Each window has a required reason and an end time: default 4 h, max 24 h. Re-enabling an active window
   is an "extend" (new end time, audited). It ends on its own at ends_at (stored in the DB, so a restart
   neither extends nor re-enables it); a run that started inside the window keeps its flags.
@@ -30,6 +30,7 @@ from datetime import datetime, timedelta
 
 from odnas import db as D
 from odnas.notify import Alert, Alerter
+from odnas.timefmt import display_time
 
 MIN_HOURS, MAX_HOURS, DEFAULT_HOURS = 1, 24, 4
 SERVICE_MAX_DELETE_PCT = 100
@@ -143,7 +144,7 @@ def enable_all(db: D.DB, alerter: Alerter, actor: str, actor_upn: str, hours: in
                 set_by_upn=actor_upn, hours=hours)
     db.audit(actor, "service_mode_enabled", "", {"scope": SCOPE_ALL, "hours": hours, "ends_at": ends,
                                                  "reason": reason, "by_upn": actor_upn})
-    alerter.raise_(Alert("service_mode", "low", f"Service mode ON for ALL users until {ends} by {actor_upn}: "
+    alerter.raise_(Alert("service_mode", "low", f"Service mode ON for ALL users until {display_time(ends)} by {actor_upn}: "
                                                 f"{reason} (no max-delete stop)", None), _recips(s))
     return ends
 
@@ -180,7 +181,7 @@ def enable_user(db: D.DB, alerter: Alerter, uid: str, actor: str, actor_upn: str
                       service_mode_reason=reason)
     db.audit(actor, "service_mode_enabled", uid, {"scope": SCOPE_USER, "hours": hours, "ends_at": ends,
                                                   "reason": reason, "by_upn": actor_upn, "upn": u["upn"]})
-    alerter.raise_(Alert("service_mode", "low", f"{u['upn']}: service mode ON until {ends} by {actor_upn}: "
+    alerter.raise_(Alert("service_mode", "low", f"{u['upn']}: service mode ON until {display_time(ends)} by {actor_upn}: "
                                                 f"{reason} (no max-delete stop)", uid), _recips(s))
     return ends
 

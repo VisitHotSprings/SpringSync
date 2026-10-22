@@ -130,8 +130,58 @@ nothing is replaced or removed without a backup.
    reminder from 30 days before it.
 9. Restart web and worker. "Connect Google Drive" appears for users whose provider is Google (Settings →
    Cloud → `gdrive_users`, or the user's admin page).
+   **Do not add any real Google user to `gdrive_users` (or switch anyone to Google) until T-G2 has passed
+   on the Ubuntu test host** (checklist below). Until then only a test account connects.
 - Rotating the secret: create the new secret in the console, re-encrypt the credential file, restart the
   worker (this also clears the app-wide `google_app_credential` stop), confirm a Google run, then delete
   the old secret in the console (T-G1 confirms the flow).
 - Volume/cost: new projects have a 1 TB/day egress threshold (§14.27). Seed large My Drives over several
   nights with `resync_bwlimit`.
+
+## Ubuntu test-host checklist (before real users)
+
+The lab tests from SPEC §12.2 that run on the Ubuntu 24.04 test host (Mark's MDF desktop) and the
+SpringSync step each one unblocks. Record date, tester and result for each in the pilot log. Every item
+that changes the NAS, Entra, Google Admin or DNS needs Mark's OK first.
+
+| # | Test | Required before | Pass when |
+|---|---|---|---|
+| 1 | T-N1, T-N2, T-N3 (NAS access, backup versions, Option B shares) | any real user | as SPEC §12.2 |
+| 2 | T-S1, T-S2, T-B1..B4 (SMB modtimes, archive folder, bisync behaviour) | any real two-way user | as SPEC §12.2 |
+| 3 | T-A3, T-A4 (OneDrive token refresh through the broker; minimal scopes) | any real OneDrive user | as SPEC §12.2 |
+| 4 | T-M1 (Copy only / Mirror to UNAS #2 `Sync-Archive`) | any real one-way user | moved files restorable from UNAS #2 |
+| 5 | T-G1 (Google Cloud project, Internal client, Trusted app; **needs Mark's OK**) | T-G2 | a hotsprings.org test account connects; an outside account is refused |
+| 6 | **T-G2: Google token refresh through the broker** | **any real Google user is connected** | see below |
+| 7 | T-G3 (Docs skipped/exported, shortcuts, duplicates, trash, 403/429 back-off) | the Google pilot user | documented behaviour, no data loss |
+
+### T-G2 (required before ANY real Google user is connected)
+Status: **not run** (no Google project exists yet; it depends on T-G1). The code is built and unit-tested
+only with a fake Google client.
+
+Goal (SPEC §4.3, §12.2): rclone's `drive` backend refreshes its access token through `token_url` →
+the SpringSync broker (`http://127.0.0.1:8081/broker/<id>/token`) with a per-run handle, and no real Google
+token is ever on disk.
+
+Use one **test** Google account in hotsprings.org (not a staff member's), connected with Connect Google
+Drive, on Copy only first, then two-way, against a test NAS folder.
+1. **Refresh via the broker:** run a sync longer than one access-token lifetime (over 1 h; e.g. a large
+   test folder with `resync_bwlimit` set low). Pass: the run log shows no auth errors, and the
+   `google_credentials` row shows a new `last_refresh_at` after the run started.
+2. **No real token on disk:** during the run, check the per-run rclone config in `/run/<slug>/rclone/`
+   (0600, tmpfs). Pass: `token` holds only the per-run handle and an expired access token; no refresh token
+   from Google, no client secret. Nothing under `/var/lib/<slug>` or `/var/log/<slug>` contains a
+   Google token (`grep -r "1//0\|ya29\." ` finds nothing).
+3. **Handle revoked:** after the run, a token request with the old handle gets `invalid_grant`.
+4. **Rotation saved:** if Google returns a new refresh token, the sealed value in `google_credentials`
+   changes and the next run still works.
+5. **Scope:** with `scope = drive` the run lists, uploads (two-way) and deletes (two-way, goes to Drive
+   trash) in My Drive only; nothing in Shared drives or shared-with-me.
+6. **Failure paths:** revoke the app for the test account (myaccount.google.com → Security → Third-party
+   apps). Pass: the next run ends `needs_reauth` for that user only. Then break the client secret on the
+   test host only. Pass: one `high` app-wide alert, every Google user is skipped, other users keep syncing,
+   and a worker restart with the right secret clears it.
+- **If T-G2 fails:** switch to the tmpfs-config fallback (`token_mode = "tmpfs_config"`,
+  `credential_type = "secret"`), re-run steps 1–6 against it, and record which mode passed. In that
+  mode step 2 changes: the real refresh token and client secret are expected in the per-run tmpfs config
+  only, and must be gone (shredded) once the run ends.
+- **Pass = all six steps.** Only then add real users to `gdrive_users`.

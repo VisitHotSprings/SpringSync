@@ -9,7 +9,7 @@
 {% if cv.warning %}<br><small>{{ cv.warning }}</small>{% endif %}
 {% if cv.provider == 'gdrive' %}<br><small>Google Docs, Sheets and Slides are {{ 'exported as Office files (read-only copies)' if cv.exporting else 'not copied to the NAS' }}.</small>{% endif %}</td></tr>
 <tr><th>Last successful sync</th><td>{{ u.last_success_at|local }}</td></tr>
-<tr><th>Last run</th><td>{{ u.last_run_at|local }} ({{ u.last_result or '-' }})</td></tr>
+<tr><th>Last run</th><td>{{ u.last_run_at|local }} ({{ (u.last_result or '-')|local_text }})</td></tr>
 <tr><th>Next run</th><td>{{ u.next_run_at|local }}</td></tr>
 <tr><th>Files that can't sync</th><td>{{ u.unsyncable_count }}</td></tr>
 <tr><th>{{ cv.cloud_side }}</th><td>{% if ms %}connected {{ ms.token_obtained_at|local }}{% if gcred %} as {{ gcred.google_email }}{% endif %}{% else %}not connected{% endif %}
@@ -32,14 +32,14 @@ Your password is stored encrypted and nobody, including IT, can view it.</p>
 <ol>
 <li>{{ cv.cloud_side }} connected: {{ 'yes' if ms else 'no' }}</li>
 {% if nas_option == 'A' %}<li>NAS login verified: {{ 'yes' if nas else 'no' }}</li>{% endif %}
-<li>File name check: {{ u.preflight_summary or ('running' if u.preflight_requested else 'not yet') }}
+<li>File name check: {{ (u.preflight_summary or ('running' if u.preflight_requested else 'not yet'))|local_text }}
  {% if has_preflight %}&middot; <a href="/me/preflight.json">download the list (only you can see it)</a>{% endif %}
  <form class="inline" method="post" action="/me/preflight"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Run again</button></form></li>
-<li>Dry run: {{ u.dryrun_summary or 'not yet' }}</li>
+<li>Dry run: {{ (u.dryrun_summary or 'not yet')|local_text }}</li>
 <li>IT approval of first sync: {{ 'approved' if u.resync_approved_by or u.last_success_at else 'waiting' }}</li>
 </ol>
 
-{% if issues %}<h2>Open issues</h2><ul>{% for i in issues %}<li>{{ i.summary }} ({{ i.opened_at|local }})</li>{% endfor %}</ul>{% endif %}
+{% if issues %}<h2>Open issues</h2><ul>{% for i in issues %}<li>{{ i.summary|local_text }} ({{ i.opened_at|local }})</li>{% endfor %}</ul>{% endif %}
 <h2>Recent runs</h2>
 <table><tr><th>Started</th><th>Kind</th><th>Result</th><th>Copied</th><th>Deleted / moved</th><th>Conflicts</th><th>Errors</th></tr>
 {% for r in runs %}<tr><td>{{ r.started_at|local }}</td><td>{{ r.op or r.kind }}</td><td>{{ r.result or 'running' }}</td><td>{{ r.files_copied }}</td><td>{{ r.files_deleted }}</td><td>{{ r.conflicts }}</td><td>{{ r.errors_count }}</td></tr>{% endfor %}

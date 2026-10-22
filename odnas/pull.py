@@ -49,10 +49,12 @@ def backup_dir(root: str, uid: str, stamp: str, per_user: bool = True) -> str:
 def build_pull(cfg: Config, jp: JobPaths, *, op: str, backup: str, log_file: str, dry_run: bool = False,
                max_delete: int | None = None, combined: str | None = None) -> list[str]:
     """op 'copy' (Copy only: never deletes) or 'sync' (Mirror). Source: the user's cloud remote.
-    Destination: the local NAS mount path. max_delete: None = omitted (service mode only), N >= 0 = the
-    backstop, -1 = no limit (counting dry-run only)."""
+    Destination: the local NAS mount path. max_delete: N >= 0 = the backstop (REQUIRED for a real Mirror run,
+    v0.9.1: also in service mode), -1 = no limit (counting dry-run only)."""
     if op not in OPS:
         raise ValueError("one-way pull uses rclone copy or sync only")
+    if op == "sync" and not dry_run and max_delete is None:
+        raise ValueError("a real Mirror run always has the --max-delete backstop (service mode included)")
     if op == "copy" and (max_delete is not None or combined):
         raise ValueError("copy never deletes: no --max-delete, no counting")
     if max_delete is not None and max_delete < -1:
@@ -177,12 +179,13 @@ def max_delete_allowed(dest_total: int, pct: int) -> int:
     return (dest_total * pct) // 100
 
 
-def evaluate(c: Count, *, pct: int, service_mode: bool, path: str) -> SafetyAbort | None:
-    """Mirror guards on the counting dry-run (§9.7.2 step 4). Empty source applies even in service mode."""
+def evaluate(c: Count, *, pct: int, path: str) -> SafetyAbort | None:
+    """Mirror guards on the counting dry-run (§9.7.2 step 4): empty source, then the user's percentage stop.
+    v0.9.1 (Reid): service mode never loosens Mirror, so there is deliberately no service-mode argument."""
     side = {"Path2": {"deletes": c.nas_only, "total": c.dest_total, "pct": pct}}
     if c.source_empty and c.dest_total > 0:
         return SafetyAbort("empty_source", "Path2", path, None, c.nas_only, c.dest_total, side, mode="pull_mirror")
-    if not service_mode and c.dest_total > 0 and c.nas_only * 100 > c.dest_total * pct:
+    if c.dest_total > 0 and c.nas_only * 100 > c.dest_total * pct:
         return SafetyAbort("max_delete", "Path2", path, pct, c.nas_only, c.dest_total, side, mode="pull_mirror")
     return None
 
