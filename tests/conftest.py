@@ -14,6 +14,7 @@ from odnas import db as D  # noqa: E402
 from odnas.config import load_config  # noqa: E402
 from odnas.crypto import Keyring, new_data_key  # noqa: E402
 from odnas.entra import TokenResult  # noqa: E402
+from odnas.privfile import is_private  # noqa: E402
 
 TENANT = "11111111-2222-3333-4444-555555555555"
 CLIENT = "66666666-7777-8888-9999-000000000000"
@@ -126,12 +127,13 @@ class FakeHelperRunner:
 
     def __call__(self, cmd):
         action, ident = cmd[-2], cmd[-1]
-        # capture what the helper would have read, then confirm the files exist with 0600
+        # capture what the helper would have read, then confirm the files exist and are private
+        # (Linux: exactly 0600; Windows, where st_mode is always 0o666: a protected owner-only DACL)
         cred = None
         if action in ("mount", "verify"):
             d = Path(self.mnt_root).parent / "run" / "creds"
             f = d / ident
-            assert oct(f.stat().st_mode & 0o777) == "0o600"
+            assert is_private(f) and is_private(d / f"{ident}.unc"), "creds file is not private"
             cred = f.read_text()
             self.uncs.append((action, (d / f"{ident}.unc").read_text().strip()))
         self.calls.append((action, ident, cred))

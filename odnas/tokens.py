@@ -28,6 +28,7 @@ from odnas.config import RCLONE_ACCESS_SCOPES, Config
 from odnas.crypto import Keyring
 from odnas.db import DB, iso, utcnow
 from odnas.entra import AUTH_CA, AUTH_OK, AUTH_REAUTH, EntraClient, classify_auth_error
+from odnas.privfile import write_private_bytes
 
 EXPIRED = "2000-01-01T00:00:00Z"
 
@@ -106,10 +107,8 @@ def render_for(cfg: Config, provider: str, cred, uid: str, token: dict, token_ur
 
 
 def write_private(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:   # exact bytes on Windows too
-        f.write(text)
+    """UTF-8, exact newlines; Linux mode 0600, Windows a private protected DACL (odnas/privfile.py)."""
+    write_private_bytes(path, text.encode("utf-8"))
 
 
 def shred(path: Path) -> None:

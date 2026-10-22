@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from odnas.config import ConfigError, load_config
@@ -45,16 +47,25 @@ def test_data_key_must_be_32_bytes():
         Keyring(b"short")
 
 
-def test_config_validation():
+def test_config_validation(monkeypatch):
     base = {"ODNAS_TENANT_ID": TENANT, "ODNAS_CLIENT_ID": CLIENT}
     assert load_config(env=base).slug == "springsync"
     for bad in ({"ODNAS_TENANT_ID": "common"}, {"ODNAS_WEB_HOST": "0.0.0.0"}, {"ODNAS_SLUG": "Bad Slug"},
                 {"ODNAS_TOKEN_MODE": "tmpfs_config"}):  # needs credential_type=secret
         with pytest.raises(ConfigError):
             load_config(env={**base, **bad})
-    c = load_config(env={**base, "ODNAS_TOKEN_MODE": "tmpfs_config", "ODNAS_CREDENTIAL_TYPE": "secret",
-                         "ODNAS_SLUG": "homesync", "ODNAS_PRODUCT_NAME": "HomeSync"})
+    hs = {**base, "ODNAS_TOKEN_MODE": "tmpfs_config", "ODNAS_CREDENTIAL_TYPE": "secret",
+          "ODNAS_SLUG": "homesync", "ODNAS_PRODUCT_NAME": "HomeSync"}
+    # default paths follow the host (v0.10): check both layouts explicitly, and that the unforced
+    # default is the layout of the OS the tests run on
+    c = load_config(env={**hs, "ODNAS_HOST_OS": "linux"})
     assert c.check_filename == ".homesync-check" and c.p_db == "/var/lib/homesync/db/homesync.db"
+    monkeypatch.setenv("ProgramData", r"D:\PD")
+    w = load_config(env={**hs, "ODNAS_HOST_OS": "windows"})
+    assert w.p_db == r"D:\PD\SpringSync\db\homesync.db"
+    native = load_config(env=hs)
+    assert native.host == ("windows" if os.name == "nt" else "linux")
+    assert native.p_db == (w.p_db if os.name == "nt" else c.p_db)
     assert c.user_agent == "NONISV|VisitHotSprings|HomeSync/0.10"
 
 

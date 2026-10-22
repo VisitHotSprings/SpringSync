@@ -166,7 +166,10 @@ $generated = $false
 if (-not $user) {
     if (-not $ServiceAccountPassword) {
         $plain = New-RandomPassword
-        $ServiceAccountPassword = ConvertTo-SecureString $plain -AsPlainText -Force
+        # Build the SecureString character by character (no ConvertTo-SecureString -AsPlainText).
+        $ServiceAccountPassword = New-Object System.Security.SecureString
+        foreach ($c in $plain.ToCharArray()) { $ServiceAccountPassword.AppendChar($c) }
+        $ServiceAccountPassword.MakeReadOnly()
         $generated = $true
     }
     Invoke-Change "create local account $ServiceAccount" {

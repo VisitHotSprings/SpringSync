@@ -70,6 +70,9 @@ Runner = Callable[[list[str]], subprocess.CompletedProcess]
 
 
 def _default_runner(cmd: list[str]) -> subprocess.CompletedProcess:
+    if os.name == "nt":
+        # the sudo mount helper only exists on the Ubuntu host; a Windows host uses WindowsShareClient
+        raise RuntimeError("the Linux mount helper can't run on Windows (host_os must not be forced to linux)")
     return subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False)
 
 

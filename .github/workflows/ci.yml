@@ -45,20 +45,14 @@ jobs:
       - name: PowerShell parse (Windows PowerShell 5.1 and PowerShell 7)
         shell: pwsh
         run: |
-          $files = Get-ChildItem deploy/windows -Include *.ps1,*.psm1,*.psd1 -Recurse
-          $bad = 0
-          foreach ($f in $files) {
-            $tok = $null; $err = $null
-            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tok, [ref]$err)
-            foreach ($e in $err) { Write-Host "$($f.Name): $($e.Extent.StartLineNumber): $($e.Message)"; $bad++ }
-          }
-          $ps51 = 'foreach ($f in Get-ChildItem deploy/windows -Include *.ps1,*.psm1 -Recurse) { $t=$null; $e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName,[ref]$t,[ref]$e); foreach ($x in $e) { Write-Host "$($f.Name) (5.1): $($x.Message)"; exit 1 } }'
-          powershell.exe -NoProfile -Command $ps51
-          if ($LASTEXITCODE -ne 0) { $bad++ }
-          if ($bad) { exit 1 }
+          pwsh -NoProfile -File .github/scripts/ps-parse.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .github/scripts/ps-parse.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: PSScriptAnalyzer
         shell: pwsh
         run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
           Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Scope CurrentUser -Force
           $r = Invoke-ScriptAnalyzer -Path deploy/windows -Recurse -Severity Error,Warning `
                -ExcludeRule PSAvoidUsingWriteHost,PSUseShouldProcessForStateChangingFunctions,PSUseSingularNouns

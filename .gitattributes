@@ -1,0 +1,10 @@
+# Files that run on the Ubuntu host or the Linux build box must keep LF even in a Windows checkout
+# (Git for Windows defaults to core.autocrlf=true).
+*.sh               text eol=lf
+deploy/mount-helper text eol=lf
+deploy/sudoers/*   text eol=lf
+deploy/systemd/*   text eol=lf
+deploy/caddy/*     text eol=lf
+*.pdf              binary
+*.whl              binary
+*.zip              binary

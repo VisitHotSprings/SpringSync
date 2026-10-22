@@ -1,5 +1,6 @@
 """v0.10: Windows deploy assets (scripts, templates, pins, lock) checked on Linux."""
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -113,6 +114,8 @@ def test_windows_lock_is_the_linux_lock_plus_windows_extras():
     assert text.count("--hash=sha256:") == len(win)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the build scripts run on the Linux build box; the Linux CI job "
+                    "checks them (bash on a Windows runner is the WSL launcher or Git bash, not the target)")
 @pytest.mark.skipif(__import__("shutil").which("bash") is None, reason="no bash")
 def test_build_scripts_are_valid_bash():
     for f in ("build-release.sh", "build-caddy-windows.sh"):

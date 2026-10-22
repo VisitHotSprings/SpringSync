@@ -704,3 +704,50 @@ def test_real_filelock_msvcrt(tmp_path):
 def test_real_long_paths_registry_readable():
     from odnas import doctor
     assert doctor.check_windows_host()[0].status in ("ok", "fail")
+
+
+# ---- private files on both hosts (v0.10.1: Windows uses a protected DACL, not POSIX modes) ------------
+def test_private_sddl_is_protected_and_owner_only():
+    from odnas.privfile import private_sddl
+    s = private_sddl("S-1-5-21-1-2-3-1001")
+    assert s.startswith("D:P(") and s.count("(A;;FA;;;") == 3
+    assert "S-1-5-18" in s and "S-1-5-32-544" in s and "S-1-5-21-1-2-3-1001" in s
+    assert "WD" not in s and "BU" not in s and "AU" not in s and "OICI" not in s
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode check; the Windows DACL is tested below")
+def test_write_private_tightens_an_existing_loose_file(tmp_path):
+    from odnas.privfile import is_private
+    from odnas.tokens import write_private
+    f = tmp_path / "creds"
+    f.write_text("old")
+    os.chmod(f, 0o644)
+    assert not is_private(f)
+    write_private(f, "new")
+    assert is_private(f) and f.read_text() == "new"
+
+
+@win_only
+def test_real_write_private_sets_a_protected_owner_only_dacl(tmp_path):
+    import win32security
+    from odnas.privfile import SID_ADMINS, SID_SYSTEM, current_user_sid, is_private
+    from odnas.tokens import write_private
+    plain = tmp_path / "plain.txt"
+    plain.write_text("x")
+    assert not is_private(plain)              # an ordinary file inherits its folder's ACL
+    f = tmp_path / "creds"
+    f.write_text("old")                        # an existing, inherited-ACL file is replaced, not reused
+    write_private(f, "username=u\npassword=p\n")
+    assert f.read_bytes() == b"username=u\npassword=p\n" and is_private(f)
+    assert not list(tmp_path.glob(".creds.*.tmp"))
+    sd = win32security.GetFileSecurity(str(f), win32security.DACL_SECURITY_INFORMATION)
+    dacl = sd.GetSecurityDescriptorDacl()
+    sids = {win32security.ConvertSidToStringSid(dacl.GetAce(i)[2]) for i in range(dacl.GetAceCount())}
+    assert sids == {SID_SYSTEM, SID_ADMINS, current_user_sid()}
+
+
+@win_only
+def test_real_linux_mount_helper_refuses_to_run_on_windows():
+    from odnas.nas import _default_runner
+    with pytest.raises(RuntimeError, match="Linux mount helper"):
+        _default_runner(["sudo", "-n", "/usr/local/lib/springsync/mount-helper", "mount", "x"])
