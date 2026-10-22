@@ -1,5 +1,10 @@
 # Changelog
 
+## CI fix (2026-10-22, no app code change)
+- GitHub CI: the secret scan now runs the free gitleaks CLI v8.30.1, pinned by SHA-256, instead of
+  `gitleaks-action`, which needs a paid license for organization repos and failed the first run.
+- Bumped `actions/checkout` to v5 and `actions/setup-python` to v6 (Node 20 deprecation).
+
 ## 0.9.1 (unreleased, lab build, 2026-10-21). Reid's review of 0.9.0
 Reid approved the 0.9.0 deviations: the `sync_runs.op` column, the backup NAS mount path, Copy only with
 guards 2 and 3 only, and UTC backup folder names. Nothing live; no schema change (no migration).
