@@ -27,6 +27,7 @@ from odnas import cloud, service_mode
 from odnas.google import ClaimsError, GoogleClient, check_claims
 from odnas.notify import Alerter
 from odnas import __version__
+from odnas import autoupdate
 from odnas import db as D
 from odnas import settings_store
 from odnas.config import Config
@@ -518,6 +519,7 @@ def create_app(cfg: Config, db: D.DB, kr: Keyring, entra: EntraClient,
                       list_keys=settings_store.LIST_KEYS, bool_keys=settings_store.BOOL_KEYS,
                       google_configured=cfg.google_configured, backup_test=_backup_test_status(),
                       nas_pause=db.flag(D.NAS_GLOBAL_PAUSE), svc_test=svc_test_status(db),
+                      auto_update=autoupdate.state(cfg, db),   # v0.11: read-only, the GUI never updates (§11.4.1)
                       msg=request.query_params.get("msg", ""), err=request.query_params.get("err", ""))
 
     @adm.post("/settings")

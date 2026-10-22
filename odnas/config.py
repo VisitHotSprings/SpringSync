@@ -21,6 +21,7 @@ GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 DELEGATED_SCOPES = ("Files.ReadWrite", "User.Read")  # MSAL adds openid/profile/offline_access
 RCLONE_ACCESS_SCOPES = "Files.ReadWrite offline_access"
 
+REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}\Z")
 GOOGLE_CLIENT_ID_RE = re.compile(r"^[0-9]{6,20}-[a-z0-9]{10,64}\.apps\.googleusercontent\.com\Z")
 GOOGLE_SECRET_FILE = "google-client.secret"   # systemd credential google-client.secret.cred; never in the repo/DB
 
@@ -78,6 +79,11 @@ class Config:
     # [nas] bootstrap defaults (GUI settings override)
     nas_host: str = "unas.hotsprings.local"
     nas_share: str = "Personal-Drive"
+    # [auto_update] (v0.11, SPEC §11.4.1). Off by default; only the server's local config can turn it on.
+    auto_update_enabled: bool = False
+    auto_update_repo: str = "VisitHotSprings/SpringSync"   # public GitHub repo whose releases are checked
+    auto_update_require_signed_tags: bool = False         # turn on once tag signing exists (§11.4 step 1)
+    auto_update_allowed_signers: str = ""                 # ssh allowed-signers file for `git verify-tag`
 
     # ---- derived -------------------------------------------------------
     def _d(self, value: str, default: str) -> str:
@@ -191,6 +197,10 @@ class Config:
                 errs.append(f"{g} must be a group object ID (GUID)")
         if self.host_os not in ("", "linux", "windows"):
             errs.append("host_os must be empty, linux or windows")
+        if not REPO_RE.match(self.auto_update_repo):
+            errs.append("auto_update repo must be <owner>/<repo>")
+        if self.auto_update_allowed_signers and not self.auto_update_allowed_signers.startswith("/"):
+            errs.append("auto_update allowed_signers must be an absolute path")
         if self.internal_timers not in ("", "on", "off"):
             errs.append("internal_timers must be empty, on or off")
         if errs:
@@ -198,7 +208,7 @@ class Config:
         return self
 
 
-_SECTIONS = ("app", "entra", "google", "paths", "nas")
+_SECTIONS = ("app", "entra", "google", "paths", "nas", "auto_update")
 
 
 def load_config(path: str | None = None, env: dict[str, str] | None = None) -> Config:
@@ -214,6 +224,8 @@ def load_config(path: str | None = None, env: dict[str, str] | None = None) -> C
             if sec == "google":   # SPEC §8.2: [google] client_id / allowed_domain -> google_client_id / ...
                 values.update({(k if k.startswith("google_") else "google_" + k): v
                                for k, v in data.get(sec, {}).items()})
+            elif sec == "auto_update":   # SPEC §11.4.1: [auto_update] enabled = true -> auto_update_enabled
+                values.update({"auto_update_" + k: v for k, v in data.get(sec, {}).items()})
             else:
                 values.update(data.get(sec, {}))
     known = {f.name: f for f in fields(Config)}

@@ -247,8 +247,12 @@ for u in "$SRC_DIR"/deploy/systemd/springsync-*; do
   name="$(basename "$u" | sed "s/^springsync/$SLUG/")"
   render "$u" "/etc/systemd/system/$name" 0644 root:root
 done
+# v0.11: the update lock shared by update.sh (exclusive) and the maintenance job (shared), SPEC §11.4.1 rule 2
+render "$SRC_DIR/deploy/tmpfiles/springsync.conf" "/etc/tmpfiles.d/$SLUG.conf" 0644 root:root
+run systemd-tmpfiles --create "/etc/tmpfiles.d/$SLUG.conf"
 run systemctl daemon-reload
-for u in caddy "$SLUG-web" "$SLUG-worker" "$SLUG-backup.timer" "$SLUG-maint.timer"; do
+# v0.11: the auto-update timer is always enabled; the script does nothing unless [auto_update] enabled = true
+for u in caddy "$SLUG-web" "$SLUG-worker" "$SLUG-backup.timer" "$SLUG-maint.timer" "$SLUG-autoupdate.timer"; do
   systemctl is-enabled --quiet "$u" 2>/dev/null || run systemctl enable "$u"
   systemctl is-active --quiet "$u" 2>/dev/null || run systemctl start "$u"
 done

@@ -24,11 +24,21 @@ from odnas.config import load_config; from odnas.db import DB; c=load_config(); 
 DB(c.p_db).audit('system', sys.argv[1], sys.argv[2], {'from': sys.argv[3]})" "$@" || true; }
 [[ "$CUR" == "$REL" ]] && { echo "$TAG is already current"; exit 0; }
 
+# v0.11: one update at a time, and never during the 03:30 maintenance job (it holds this lock shared,
+# see <slug>-maint.service). Wait up to 15 min; exit 75 (EX_TEMPFAIL, nothing changed) if still busy.
+UPDATE_LOCK="/run/lock/$SLUG-update.lock"
+exec 8>>"$UPDATE_LOCK"
+flock -w 900 8 || { echo "another update or the maintenance job is running; nothing changed" >&2; exit 75; }
+
 say "1. fetch $TAG"
 if [[ ! -d "$REL" ]]; then
   git clone --quiet --depth 1 --branch "$TAG" "$(git -C "$CUR" remote get-url origin)" "$REL"
-  # tag signature verification: enable once the org + signing key exist (SPEC §14.9 OPEN)
-  if [[ -n "${REQUIRE_SIGNED_TAGS:-}" ]]; then git -C "$REL" fetch --quiet --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG" && git -C "$REL" verify-tag "$TAG"; fi
+fi
+# Tag signature verification: enable once the org + signing key exist (SPEC §14.9 OPEN). v0.11: also checked
+# when releases/<tag> is left over from an earlier attempt, so a failed check can't be skipped by re-running.
+if [[ -n "${REQUIRE_SIGNED_TAGS:-}" ]]; then
+  git -C "$REL" fetch --quiet --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG" && git -C "$REL" verify-tag "$TAG" \
+    || { echo "tag $TAG is not signed by an allowed key; nothing changed" >&2; exit 1; }
 fi
 
 say "2. build venv (hash-locked)"

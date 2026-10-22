@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.11.0 (2026-10-22)
+- **New: opt-in nightly auto-update for the Ubuntu host** (SPEC §11.4.1; approved by Mark on Oct 22, 2026).
+  **Off by default** (`[auto_update] enabled = false`). When on, `<slug>-autoupdate.timer` (02:45 Central +
+  up to 30 min) runs `deploy/auto-update.sh`, which installs the newest **patch** release of the running minor
+  through the existing `update.sh` (drain, backup, smoke tests, health check, rollback). Only normal published
+  GitHub releases with a plain `vX.Y.Z` tag count, 24 h after `published_at`. Drafts, pre-releases, suffixed tags and
+  branches are ignored. A new minor/major is alerted and waits for a manual update. It waits for the 02:30
+  backup to finish (up to 15 min, else skips with `backup_running`) and never runs while a Mirror run, an
+  approval or a safety hold (percentage stop or `--max-delete` backstop) is pending. A failed update rolls back and turns auto-update off until
+  `auto-update.sh --reenable`. Unsigned tags are refused once `require_signed_tags = true`. Every check is
+  audited. A GitHub outage is a logged no-op.
+- New `odnas auto-update check|report|status` (DB and config only, run as the service account).
+- Admin Settings shows the auto-update state and the last check, **read-only**: the GUI never starts an update.
+- `update.sh`: with `REQUIRE_SIGNED_TAGS`, the tag signature is now also checked when `releases/<tag>` is left
+  over from an earlier attempt (before, a re-run skipped the check).
+- **Update lock** `/run/lock/<slug>-update.lock` (created by `/etc/tmpfiles.d/<slug>.conf`): `update.sh` holds
+  it exclusively (waits up to 15 min, else exits 75 with nothing changed), the 03:30 maintenance job holds it
+  shared, so maintenance never runs during an update and vice versa.
+- `install.sh` step 12 installs and enables the new timer and the tmpfiles entry.
+- Built to SPEC v0.10 §11.4.1 (Reid); revised in place before the first push.
+- Pilot note: all releases so far are GitHub pre-releases, so auto-update ignores them. Publish a normal
+  release for it to act. See docs/DEPLOY.md "Automatic updates (opt-in)".
+- No schema change.
+
 ## 0.10.3 (2026-10-22)
 - **Fixed: `install.sh` lost the `--version` value on real Ubuntu.** It sourced `/etc/os-release`, whose
   `VERSION` variable ("24.04.5 LTS (Noble Numbat)") overwrote ours, so step 6 tried to clone a tag by that

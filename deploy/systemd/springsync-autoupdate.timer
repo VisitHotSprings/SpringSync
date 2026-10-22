@@ -1,0 +1,11 @@
+[Unit]
+Description=@PRODUCT@ nightly auto-update window 02:45 America/Chicago + up to 30 min (SPEC §11.4.1)
+
+[Timer]
+OnCalendar=*-*-* 02:45:00 America/Chicago
+RandomizedDelaySec=30min
+# No catch-up after downtime: a missed night waits for the next quiet window instead of updating at boot.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

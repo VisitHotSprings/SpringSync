@@ -48,6 +48,12 @@ def main(argv: list[str] | None = None) -> int:
     ae = sub.add_parser("audit-event", help="append one system audit entry (deploy scripts; DB only, no keys)")
     ae.add_argument("action", choices=["deploy", "rollback", "install", "uninstall"])
     ae.add_argument("target"); ae.add_argument("--from", dest="from_", default="")
+    au = sub.add_parser("auto-update", help="opt-in nightly auto-update decisions (SPEC §11.4.1; run by auto-update.sh)")
+    au.add_argument("action", choices=["check", "report", "status"])
+    au.add_argument("--current", default="", help="running release tag (check)")
+    au.add_argument("--event", default="", choices=["", "installed", "failed", "refused_unsigned", "reenabled",
+                                                       "backup_running", "busy"])
+    au.add_argument("--tag", default=""); au.add_argument("--from", dest="from_", default="")
     sub.add_parser("keygen", help="create data.key and the Entra certificate if missing (Windows installer)")
     sc = sub.add_parser("secrets"); sc.add_argument("action", choices=["ingest", "status"])
     a = ap.parse_args(argv)
@@ -151,6 +157,8 @@ def main(argv: list[str] | None = None) -> int:
         cfg = load_config()
         D.DB(cfg.p_db).audit("system", a.action, a.target, {"from": a.from_, "host": cfg.host})
         return 0
+    if a.cmd == "auto-update":
+        return _auto_update(a)
     if a.cmd == "keygen":
         from odnas.config import load_config
         from odnas.keygen import keygen
@@ -173,6 +181,29 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(rekey_all(db, kr)))
         return 0
     return 2
+
+
+def _auto_update(a) -> int:
+    """DB + config only (no keys), like audit-event; run as the service account by deploy/auto-update.sh."""
+    from odnas import autoupdate
+    from odnas import db as D
+    from odnas.config import load_config
+    cfg = load_config()
+    db = D.DB(cfg.p_db)
+    if a.action == "status":
+        print(json.dumps(autoupdate.state(cfg, db), default=str))
+        return 0
+    if a.action == "report":
+        if not a.event or not autoupdate.parse_tag(a.tag):
+            print("report needs --event and a vX.Y.Z --tag", file=sys.stderr)
+            return 2
+        autoupdate.report(cfg, db, a.event, a.tag, a.from_)
+        return 0
+    d = autoupdate.check(cfg, db, a.current)
+    print(json.dumps({"action": d.action, "reason": d.reason, "tag": d.tag, "newer_minor": d.newer_minor,
+                      "require_signed_tags": cfg.auto_update_require_signed_tags,
+                      "allowed_signers": cfg.auto_update_allowed_signers}))
+    return 0
 
 
 def _nas_ctx():

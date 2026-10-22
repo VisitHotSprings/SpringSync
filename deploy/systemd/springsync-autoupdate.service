@@ -1,0 +1,16 @@
+[Unit]
+Description=@PRODUCT@ opt-in nightly auto-update check (SPEC §11.4.1; no-op unless [auto_update] enabled = true)
+# The script itself waits for <slug>-backup.service (After= does not order two separate timers' runs).
+After=network-online.target
+Wants=network-online.target
+OnFailure=@SLUG@-alert@%n.service
+
+[Service]
+Type=oneshot
+# root: update.sh writes /opt/@SLUG@, restarts the services and takes the pre-<tag> DB backup.
+# The decision itself runs as @SLUG@ (sudo -u inside the script).
+Environment=ODNAS_CONFIG=/etc/@SLUG@/@SLUG@.toml
+ExecStart=/opt/@SLUG@/current/deploy/auto-update.sh --slug @SLUG@
+# update.sh can wait up to 30 min for running jobs, then build a venv and run smoke tests
+TimeoutStartSec=90min
+UMask=0022

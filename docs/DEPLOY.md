@@ -39,6 +39,84 @@ Manual rollback: `sudo /opt/springsync/current/deploy/rollback.sh [--restore-db]
 
 The GUI shows the running version but never triggers an update (SPEC §11.4).
 
+## Automatic updates (opt-in)
+v0.11, SPEC §11.4.1. **Off by default.** Updates stay manual (above) unless an admin turns this on in the
+server's local config. The admin **Settings** page shows the setting, the last check and its result, but it
+cannot change the setting or start an update.
+
+**What it does.** `<slug>-autoupdate.timer` runs `deploy/auto-update.sh` every night at **02:45 Central plus
+a random delay of up to 30 min** (02:45–03:15; no catch-up run at boot after a missed night). Each run:
+1. Does nothing unless `[auto_update] enabled = true`, and nothing while `/etc/<slug>/auto-update.disabled`
+   exists (written after a failed update).
+2. **Waits for the 02:30 backup.** If `<slug>-backup.service` is still active it waits up to 15 min, then
+   skips the night (`backup_running`). It doesn't rely on `After=`, because two separate timers don't order
+   each other's runs.
+3. Skips the night if a manual `update.sh` or the 03:30 maintenance job holds the update lock
+   (`/run/lock/<slug>-update.lock`, reason `update_or_maintenance_running`). `update.sh` holds that lock
+   exclusively for the whole update; the maintenance job holds it shared, so **maintenance waits for an update
+   to finish** (up to 90 min) and an update waits for maintenance (up to 15 min, then exits 75 with nothing
+   changed). The lock file is created at boot by `/etc/tmpfiles.d/<slug>.conf`.
+4. Skips the night while a **Mirror run** (or its counting dry-run) is in progress, an **approval is pending**
+   (an Accept-deletes or Mirror-baseline approval, or a direction change waiting to be applied), or a **safety
+   hold** is open (a user stopped by the percentage delete check or the Mirror `--max-delete` backstop, waiting
+   for Restore or Accept deletes). A user who is only waiting for "Approve initial sync" and a two-way run in
+   progress don't block (`update.sh` drains running jobs).
+5. Reads the public repo's **GitHub releases** anonymously (`api.github.com`, no token) and keeps only
+   **normal published releases** with a plain `vX.Y.Z` tag. Drafts, **pre-releases**, tags with any suffix
+   (`-rc1`, `-beta`), tags without a release, and branches are ignored.
+6. Takes the highest such release that has been **public for at least 24 h** (counted from its `published_at`) and is
+   a **patch of the running minor** (running v0.11.0: v0.11.1, v0.11.2, ...). A new minor or major
+   (`v0.12.0`, `v1.0.0`) is audited and alerted, and waits for a manual `update.sh`.
+7. If tag signing is on (`require_signed_tags = true`), refuses a tag that is unsigned or not signed by an
+   allowed key (alert, nothing changed).
+8. Runs the normal `update.sh <tag>`: drain, `pre-<tag>` DB backup, smoke tests, health check and automatic
+   rollback.
+9. **If anything fails it turns itself off** (`/etc/<slug>/auto-update.disabled`) and raises a `high` alert,
+   so a bad release is never retried every night.
+
+If GitHub can't be reached, the run logs a warning, writes a `fetch_failed` audit entry and changes nothing.
+Every check writes an audit entry (`auto_update_checked`, `_skipped` with the reason, `_installed`,
+`_rolled_back`, `_self_disabled`, `_refused`, `_reenabled`). Installs, rollbacks, refusals and a waiting minor/major also open
+an issue on the admin page. Email follows the alert-mail decision (SPEC §14.5, §14.36). Ubuntu only for
+now; the Windows host keeps manual `update.ps1` (SPEC §14.37).
+
+**Pilot note: it only acts on a normal release.** Every SpringSync release so far is marked
+**pre-release** on GitHub, so auto-update ignores all of them. For it to install something, publish the
+release as a normal release (untick "Set as a pre-release"), then wait 24 h.
+
+**Getting the timer onto a server installed before v0.11.0.** `update.sh` doesn't install systemd units,
+so after moving to v0.11.0, re-run the installer once (it's idempotent and keeps keys, the DB and the config):
+`cd /opt/springsync/current/deploy && sudo ./install.sh --version v0.11.0`. Then
+`systemctl list-timers springsync-autoupdate.timer` should list it.
+
+**Turn it on** (as root on the server; needs Mark's OK):
+```
+sudo tee -a /etc/springsync/springsync.toml >/dev/null <<'TOML'
+
+[auto_update]
+enabled = true
+TOML
+sudo -u springsync env ODNAS_CONFIG=/etc/springsync/springsync.toml springsync auto-update status   # config valid, shows enabled:true
+sudo /opt/springsync/current/deploy/auto-update.sh --check-only   # shows what it would do, changes nothing
+systemctl list-timers springsync-autoupdate.timer
+```
+If the `[auto_update]` section is already in the file (servers installed from v0.11.0 or later), change
+`enabled = false` to `enabled = true` instead of appending. Turn it off again with `enabled = false`.
+
+**After a failed update** (Settings shows "Off after a failed update"): look at
+`journalctl -u springsync-autoupdate` and the audit log, fix or pull the bad release, then:
+```
+sudo /opt/springsync/current/deploy/auto-update.sh --reenable
+```
+
+**Tag signing** (once the signing key exists, SPEC §11.4 step 1): add `require_signed_tags = true` and, for
+SSH signatures, `allowed_signers = "/etc/springsync/deploy/allowed_signers"` to `[auto_update]`. Until
+then the GitHub org must require 2FA for every owner and member, because the release tag is the trust
+boundary.
+
+**Run one check by hand:** `sudo systemctl start springsync-autoupdate.service` (the same 24 h and patch-only
+rules apply). A manual `update.sh <tag>` skips the waiting period and can install any `vX.Y.Z`.
+
 ## Services
 | Unit | Starts at boot | Restart |
 |---|---|---|
@@ -46,7 +124,8 @@ The GUI shows the running version but never triggers an update (SPEC §11.4).
 | `<slug>-web` | yes | on-failure, 5 s, burst 5/300 s, `OnFailure=` alert |
 | `<slug>-worker` | yes | same; `KillMode=mixed`, 120 s stop timeout |
 | `<slug>-backup.timer` | 02:30 America/Chicago | `Persistent=true` |
-| `<slug>-maint.timer` | 03:30 America/Chicago | `Persistent=true` |
+| `<slug>-maint.timer` | 03:30 America/Chicago; waits while an update holds the update lock | `Persistent=true` |
+| `<slug>-autoupdate.timer` | 02:45 America/Chicago + up to 30 min, after the backup has finished; no-op unless enabled | `Persistent=false` |
 
 ## Logs
 - App and worker logs go to journald (`journalctl -u <slug>-worker`).

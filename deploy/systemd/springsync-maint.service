@@ -8,7 +8,11 @@ User=@SLUG@
 Group=@SLUG@
 Environment=ODNAS_CONFIG=/etc/@SLUG@/@SLUG@.toml
 LoadCredentialEncrypted=data.key:/etc/@SLUG@/creds/data.key.cred
-ExecStart=/opt/@SLUG@/current/venv/bin/odnas maint
+# v0.11 (SPEC §11.4.1 rule 2): never during an update. update.sh holds the lock exclusively; this waits for it
+# (shared, up to 90 min) and then holds it while maintenance runs, so an update waits for maintenance too.
+# The lock file is created by systemd-tmpfiles (/etc/tmpfiles.d/@SLUG@.conf), so the read-only /run is fine.
+ExecStart=/usr/bin/flock --shared --wait 5400 /run/lock/@SLUG@-update.lock /opt/@SLUG@/current/venv/bin/odnas maint
+TimeoutStartSec=2h
 ProtectSystem=strict
 ReadWritePaths=/var/lib/@SLUG@ /var/log/@SLUG@ /run/@SLUG@
 NoNewPrivileges=yes

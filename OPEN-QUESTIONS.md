@@ -289,3 +289,21 @@ Built from SPEC §11.5 / §11.6. Each item is how it's built now; Reid / Mark to
 7. **Not tested on real Windows:** T-W1 (1219), T-W2 (long paths / encoding), T-W3 (CTRL_BREAK stop),
    T-W4 (A vs B), reboot during a run, DPAPI after a password change. The `windows` CI job runs the
    Windows unit tests once the branch is pushed.
+
+## I. v0.11 opt-in auto-update (Dex, 2026-10-22)
+Built to SPEC §11.4.1. Reid settled items 1–7 in **SPEC v0.10** (§14 "Resolved in v0.10"); v0.11.0 follows
+them as written:
+1. ~~Which releases count~~: only normal published releases with a plain `vX.Y.Z` tag. No drafts, no
+   pre-releases, no bare tags, no `git ls-remote` fallback (§11.4.1 rule 3). Built.
+2. ~~24 h wait~~: counted from `published_at` (§11.4.1 rule 4). Built.
+3. ~~"Approval pending"~~: Mirror run in progress, a pending Accept-deletes or Mirror-baseline approval, an open
+   safety hold (`state=safety_abort`, from the percentage stop or the `--max-delete` backstop), or a pending
+   direction change. "Approve initial sync" and two-way runs don't block (§11.4.1 rule 7). Built.
+4. ~~Window vs. backup~~: 02:45 Central + up to 30 min. auto-update.sh checks `<slug>-backup.service`, waits up
+   to 15 min and otherwise skips with `backup_running` (§11.4.1 rule 2). The 03:30 maintenance job waits for an
+   update through the shared update lock (Dex's choice of lock: `/run/lock/<slug>-update.lock`). Built.
+5. ~~Catch-up~~: none, `Persistent=false`. Built.
+6. ~~Alert mail~~: admin-page issues now; email follows §14.5 (SPEC §14.36).
+7. ~~Windows~~: Ubuntu only in v0.11.0; Windows later as a Scheduled Task (SPEC §14.37).
+8. **Still open: tag signing** (SPEC §14.9). `require_signed_tags` and `allowed_signers` exist, but there's no
+   signing key yet. Until there is one, the GitHub org must require 2FA for every owner and member.

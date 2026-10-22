@@ -33,3 +33,17 @@ allowed_domain = "hotsprings.org"
 [nas]
 nas_host = "unas.hotsprings.local"
 nas_share = "Personal-Drive"
+
+[auto_update]
+# v0.11, SPEC §11.4.1: opt-in nightly auto-update (Ubuntu host). OFF unless set here; the GUI only shows it.
+# When on, the <slug>-autoupdate timer (02:45 Central + up to 30 min, after the 02:30 backup) installs the newest PATCH release of the
+# running minor version (v0.11.x) through deploy/update.sh, only from a normal published GitHub release
+# (never a draft, a pre-release or a tag with a suffix), only 24 h after it was published, and never while a
+# Mirror run, an approval or a safety hold is pending. A new minor/major is alerted and waits for a manual update.sh.
+# A failed update rolls back and turns auto-update off (/etc/springsync/auto-update.disabled) until an
+# admin runs: sudo /opt/springsync/current/deploy/auto-update.sh --reenable
+enabled = false
+repo = "VisitHotSprings/SpringSync"
+# Once tag signing exists: refuse unsigned tags and tags not signed by an allowed key.
+require_signed_tags = false
+# allowed_signers = "/etc/springsync/deploy/allowed_signers"   # ssh signing keys (git gpg.ssh.allowedSignersFile)
