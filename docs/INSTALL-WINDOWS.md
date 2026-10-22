@@ -1,6 +1,6 @@
-# SpringSync 0.10.0: test install on Windows 11 Pro
+# SpringSync 0.10.1: test install on Windows 11 Pro
 
-For: Mark. Version: 0.10.0 (lab build). Plan: SPEC.md §11.5 (Windows host) and §11.6 (moving from Ubuntu).
+For: Mark. Version: 0.10.1 (lab build). Plan: SPEC.md §11.5 (Windows host) and §11.6 (moving from Ubuntu).
 
 > **What this is.** This guide sets up a **test** install on one Windows 11 Pro desktop. The first test
 > syncs only **your own** account, in **Copy only** mode (cloud to NAS; nothing on the NAS or in the cloud is
@@ -48,8 +48,8 @@ You need:
 4. **BIOS/UEFI setting:** "Restore on AC power loss" (it may be called "After power loss") = **Power On**, so the
    PC comes back on its own after a power cut. The installer can't check this. Set it in the firmware setup.
 5. **The release files** (from Dex):
-   - `SpringSync-0.10.0-windows.zip`
-   - its SHA-256 (in `SpringSync-0.10.0-windows.zip.sha256`, and in the report)
+   - `SpringSync-0.10.1-windows.zip`
+   - its SHA-256 (in `SpringSync-0.10.1-windows.zip.sha256`, and in the report)
    - `SHA256SUMS.txt` (lists the SHA-256 of every file inside the zip)
 6. **Later, for HTTPS (section 5):** a `caddy.exe` built by `build-caddy-windows.sh`, plus the DNS pieces.
 
@@ -57,7 +57,7 @@ What the installer puts on the PC:
 
 | Where | What |
 |---|---|
-| `C:\Program Files\SpringSync\releases\0.10.0\` | the app and its own private Python (official python.org files) |
+| `C:\Program Files\SpringSync\releases\0.10.1\` | the app and its own private Python (official python.org files) |
 | `C:\Program Files\SpringSync\current` | a link to the release that's running |
 | `C:\Program Files\SpringSync\bin\rclone.exe` | rclone v1.75.2, the official file, unchanged |
 | `C:\ProgramData\SpringSync\` | settings, database, keys, logs, backups. Only Administrators and the service account can open it |
@@ -75,15 +75,15 @@ What the installer puts on the PC:
 3. Check the SHA-256. The value it prints must match the `.sha256` file exactly:
    ```powershell
    cd C:\Install
-   (Get-FileHash .\SpringSync-0.10.0-windows.zip -Algorithm SHA256).Hash.ToLower()
-   Get-Content .\SpringSync-0.10.0-windows.zip.sha256
+   (Get-FileHash .\SpringSync-0.10.1-windows.zip -Algorithm SHA256).Hash.ToLower()
+   Get-Content .\SpringSync-0.10.1-windows.zip.sha256
    ```
    If they differ, **stop**. Ask for a fresh copy.
 4. Unblock the zip (Windows marks downloaded files), then extract it:
    ```powershell
-   Unblock-File .\SpringSync-0.10.0-windows.zip
-   Expand-Archive .\SpringSync-0.10.0-windows.zip -DestinationPath C:\Install
-   cd C:\Install\SpringSync-0.10.0-windows
+   Unblock-File .\SpringSync-0.10.1-windows.zip
+   Expand-Archive .\SpringSync-0.10.1-windows.zip -DestinationPath C:\Install
+   cd C:\Install\SpringSync-0.10.1-windows
    ```
    The installer checks every file against `SHA256SUMS.txt` again before it changes anything, and unblocks
    only the files in this folder.
@@ -139,7 +139,7 @@ What you'll see:
 
 The installer is safe to run again. It never overwrites your settings, keys or database.
 
-1. In the administrator PowerShell window, inside `C:\Install\SpringSync-0.10.0-windows`:
+1. In the administrator PowerShell window, inside `C:\Install\SpringSync-0.10.1-windows`:
    ```powershell
    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
    ```
@@ -491,10 +491,16 @@ Keep Ubuntu as a cold standby for 2 weeks.
 - A text check of every PowerShell script: brackets, plain ASCII, none of the forbidden commands.
 - The official Python, pip and rclone files: SHA-256 checked.
 
-**Not tested (needs this PC or a Windows runner):**
-- The PowerShell scripts have never run; PowerShell and PSScriptAnalyzer weren't available to Dex. A
-  GitHub Windows CI job is included; it runs once the code is pushed.
-- The Windows services; DPAPI on the real account; NAS sessions (WNet) against the UNAS Pro.
+**Tested on a real Windows runner (GitHub CI, Windows Server 2025, from 0.10.1):**
+- The Windows tests and the update smoke tests pass on real Windows, including: DPAPI encrypt/decrypt,
+  the Job Object killing an rclone process tree, the run timeout stop, file locking, the long-paths
+  registry check, and private files (NAS login and rclone config files get an owner-only, protected ACL).
+- Every PowerShell script parses in Windows PowerShell 5.1 and PowerShell 7; PSScriptAnalyzer reports no
+  errors (only warnings).
+
+**Not tested (needs this PC):**
+- The PowerShell scripts have never been *run* end to end (install, update, rollback, uninstall).
+- The Windows services; DPAPI on the real service account; NAS sessions (WNet) against the UNAS Pro.
 - rclone's graceful stop from a service (T-W3); the Caddy Windows build (T-C1).
 - Everything with Microsoft, Google, DNS and the NAS.
 

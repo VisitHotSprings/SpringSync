@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.10.1 (unreleased, lab build, 2026-10-22). Windows CI fixes
+The first run of the `windows` CI job on a real Windows runner found 7 test failures. Two of them were real
+Windows bugs; the rest were tests that assumed Linux. Nothing live; no schema change.
+
+### Fixed (real bugs)
+- **Private files on Windows** (`odnas/privfile.py`; `tokens.write_private` uses it). On Windows the
+  0600 mode was silently ignored (`st_mode` is always 0o666), so NAS login files, per-run rclone configs
+  and delta files only had the inherited folder ACL. They now get their own **protected DACL** (no
+  inheritance; SYSTEM, Administrators and the current account only). It's written to a new no-share
+  temp file created with that DACL, then renamed over the target, so the secret is never in a file with a
+  looser ACL. Linux: 0600 is now also forced on an existing file (`O_TRUNC` kept an older, looser mode).
+- **`update.ps1` smoke tests would have failed on every Windows update.** Five of them (Copy only, Mirror
+  safety stop, service-mode stop and backstop) ran into the 0600 check above. With the fix they pass on
+  real Windows, using the same safety check (`is_private`).
+- The Linux sudo mount helper now refuses to run on Windows, with a clear error, instead of failing on a
+  missing `sudo`. The NAS provider selection was already correct (`WindowsShareClient` when the host is
+  Windows); the failing tests had forced `host_os=linux`.
+- `install.ps1`: the generated service-account password is built into a SecureString one character at a
+  time, not with `ConvertTo-SecureString -AsPlainText` (a PSScriptAnalyzer error rule).
+- `.gitattributes`: Linux-side scripts (`*.sh`, mount helper, sudoers, systemd, Caddy) keep LF line
+  endings in a Windows checkout.
+
+### Changed (tests that assumed Linux)
+- `test_config_validation` checks both default layouts (`host_os=linux` and `windows`), and that the
+  unforced default matches the OS the tests run on.
+- Copy only backup-dir check is separator-agnostic (Windows temp paths are `C:\...`).
+- `bash -n` of the build scripts is skipped on Windows (they run on the Linux build box; the Linux job
+  checks them).
+- New tests: real-Windows DACL check (protected, exactly SYSTEM / Administrators / current account),
+  the mount-helper refusal, the SDDL, and the Linux "tighten an existing loose file" check.
+
+### CI
+- The PowerShell parse step runs `.github/scripts/ps-parse.ps1` in both `pwsh` and `powershell.exe` (no
+  nested quoting). PSScriptAnalyzer installs from a trusted PSGallery. Result: 7 files parse with 0 errors
+  in 5.1 and 7, and PSScriptAnalyzer reports 0 errors. The remaining warnings are unused-parameter false
+  positives (the parameters are used inside script blocks), `Invoke-Change` relying on the script's
+  ShouldProcess, and one empty catch block, which now logs at verbose level.
+
 ## 0.10.0 (unreleased, lab build, 2026-10-22). Windows 11 Pro host
 SPEC §11.5 (Windows host) and §11.6 (Ubuntu → Windows). One codebase: the Ubuntu host is unchanged and
 the full Linux suite still passes. Nothing live: no Microsoft, Google, NAS, Entra or DNS calls were made,

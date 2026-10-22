@@ -150,7 +150,7 @@ function Wait-Healthy {
         try {
             $r = Invoke-RestMethod -Uri 'http://127.0.0.1:8080/healthz' -TimeoutSec 5 -UseBasicParsing
             if ($r.worker_alive -eq $true) { return $true }
-        } catch { }
+        } catch { Write-Verbose "not healthy yet: $($_.Exception.Message)" }
         Start-Sleep -Seconds 5
     }
     $false
