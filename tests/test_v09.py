@@ -375,9 +375,10 @@ def test_copy_only_uses_rclone_copy_and_never_deletes(pw, db, kr):
     assert w.runner.run(uid, "bisync").result == "ok"
     (cmd,) = pulls(proc)
     assert cmd[1] == "copy" and "--max-delete" not in cmd and "--delete-after" not in cmd
-    assert re.search(r"/\.springsync-archive/\d{4}-\d\d-\d\d_\d{6}$", flag(cmd, "--backup-dir"))
+    # separator-agnostic: on a Windows test runner tmp_path (and so the NAS root) is C:\...
+    assert re.search(r"[\\/]\.springsync-archive[\\/]\d{4}-\d\d-\d\d_\d{6}$", flag(cmd, "--backup-dir"))
     assert not any("--dry-run" in c for c in proc.calls if c[1] in ("copy", "sync"))   # no pre-count for Copy
-    assert "--local-encoding" in cmd and cmd[2].startswith("od-") and cmd[3].startswith("/")
+    assert "--local-encoding" in cmd and cmd[2].startswith("od-") and os.path.isabs(cmd[3])
     r = db.one("SELECT * FROM sync_runs WHERE user_id=? ORDER BY id DESC", (uid,))
     assert (r["direction"], r["provider"], r["op"]) == ("pull_copy", "onedrive", "pull_copy")
 
