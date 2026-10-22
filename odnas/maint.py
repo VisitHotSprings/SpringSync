@@ -26,6 +26,26 @@ BACKUP_EXCLUDE_DIRS = {"keys", "creds", "deploy"}
 BACKUP_EXCLUDE_FILES = {"gcp-acme-sa.json"}
 
 
+def audit_to_file(db: D.DB, since_seq: int, log_dir: str) -> int:
+    """Windows (v0.10): no journald; append audit entries as JSON lines to <logs>\\audit\\audit-YYYY-MM.jsonl
+    (second copy outside the DB, same fields as the journal line). Never contains secrets: the audit
+    table never does."""
+    import json as _json
+    out = Path(log_dir) / "audit"
+    out.mkdir(parents=True, exist_ok=True)
+    last = since_seq
+    rows = db.all("SELECT * FROM audit_log WHERE seq > ? ORDER BY seq", (since_seq,))
+    if not rows:
+        return last
+    f = out / f"audit-{datetime.now(timezone.utc):%Y-%m}.jsonl"
+    with open(f, "a", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(_json.dumps({"seq": r["seq"], "ts": r["ts"], "actor": r["actor"], "action": r["action"],
+                                  "target": r["target"], "hash": r["hash"]}) + "\n")
+            last = r["seq"]
+    return last
+
+
 def audit_to_journal(db: D.DB, since_seq: int, slug: str = "springsync") -> int:
     """Write audit entries to journald/syslog with identifier <slug>-audit (best effort)."""
     if not Path("/dev/log").exists():
@@ -116,7 +136,8 @@ def run_maint(cfg: Config, db: D.DB, alerter: Alerter, probe_tls: bool = True) -
     if not ok:
         alerter.raise_(Alert("audit_chain", "critical", f"audit hash chain verification failed: {msg}"))
     prev = db.heartbeat("audit_journal_seq")
-    last = audit_to_journal(db, int(prev["detail"]) if prev else 0, cfg.slug)
+    since = int(prev["detail"]) if prev else 0
+    last = audit_to_file(db, since, cfg.p_log) if cfg.is_windows else audit_to_journal(db, since, cfg.slug)
     db.beat("audit_journal_seq", str(last))
     out["audit_chain"] = ok
     out["pruned_logs"] = prune_logs(cfg)
@@ -166,10 +187,16 @@ def run_backup(cfg: Config, db: D.DB, out_dir: str | None = None, extra_dirs: tu
     os.chmod(dbfile, 0o600)
     tarpath = out / f"config-{stamp}.tar.gz"
     with tarfile.open(tarpath, "w:gz") as tf:
-        for d in (cfg.p_etc, *extra_dirs):
-            if Path(d).is_dir():
-                tf.add(d, arcname=Path(d).name, filter=_tar_filter)
-    os.chmod(tarpath, 0o600)
+        if cfg.is_windows:
+            # ProgramData\SpringSync holds data, logs and these backups too: take only the config files
+            for f in (Path(cfg.p_etc) / f"{cfg.slug}.toml", Path(cfg.p_etc) / "caddy" / "Caddyfile"):
+                if f.is_file():
+                    tf.add(str(f), arcname=f"config/{f.name}", filter=_tar_filter)
+        else:
+            for d in (cfg.p_etc, *extra_dirs):
+                if Path(d).is_dir():
+                    tf.add(d, arcname=Path(d).name, filter=_tar_filter)
+    os.chmod(tarpath, 0o600)   # no-op on Windows; the ProgramData ACL protects it
     for prefix in ("db-", "config-"):
         files = sorted((p for p in out.glob(prefix + "2*")),  # timestamped only; pre-<tag> backups are kept
                        key=lambda p: p.stat().st_mtime)

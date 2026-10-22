@@ -1,0 +1,36 @@
+# Rendered by install.ps1 to @DATA@/caddy/Caddyfile (SPEC 8.1 / 11.5.7). Same site as on Ubuntu:
+# HTTPS only, certificate via DNS-01 with CNAME delegation:
+#   public zone:  _acme-challenge.@SYNC_HOST@.  CNAME  sync.<ACME_ZONE>.
+# Caddy writes the TXT record in the separate ACME-only zone / GCP project.
+# GCP_ACME_PROJECT and ACME_ZONE come from the caddy service's environment (install.ps1).
+# Lab test T-C1 must pass first; for the very first issue uncomment the staging CA line.
+{
+	email @ACME_EMAIL@
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+	storage file_system {
+		root "@DATA@/caddy/data"
+	}
+	admin localhost:2019
+	# a Windows service has no console: Caddy's own log goes to a file (10 x 10 MB)
+	log {
+		output file "@DATA@/logs/caddy.log" {
+			roll_size 10MiB
+			roll_keep 10
+		}
+	}
+}
+
+@SYNC_HOST@ {
+	tls {
+		dns googleclouddns {
+			gcp_project {$GCP_ACME_PROJECT}
+			gcp_application_default "@DATA@/caddy/gcp-acme-sa.json"
+		}
+		dns_challenge_override_domain sync.{$ACME_ZONE}
+		resolvers 8.8.8.8 1.1.1.1
+	}
+	encode zstd gzip
+	header Strict-Transport-Security "max-age=31536000"
+	header -Server
+	reverse_proxy 127.0.0.1:8080
+}

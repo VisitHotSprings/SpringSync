@@ -1,5 +1,8 @@
 # Deploy model
 
+This page is the Ubuntu host. For the Windows 11 Pro host (v0.10, SPEC §11.5) see
+[INSTALL-WINDOWS.md](INSTALL-WINDOWS.md); its scripts are in `deploy/windows/`.
+
 ## Read-only deploy-key pull
 - The code lives in a private GitHub repo. The org/account doesn't exist yet (OPEN).
 - On the repo, add a **deploy key** with *Allow write access* **unchecked**. Its private half is

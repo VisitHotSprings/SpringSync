@@ -1,9 +1,11 @@
-"""Bootstrap configuration (SPEC §8.2).
+r"""Bootstrap configuration (SPEC §8.2).
 
-Source order: built-in defaults < /etc/<slug>/<slug>.toml < ODNAS_* env vars.
+Source order: built-in defaults < /etc/<slug>/<slug>.toml (Windows:
+%ProgramData%\SpringSync\<slug>.toml) < ODNAS_* env vars.
 The bootstrap file holds NO secrets. Secrets are read from files delivered by
-systemd LoadCredentialEncrypted= ($CREDENTIALS_DIRECTORY) or, for local dev,
-from an explicit key directory. Everything operational lives in the DB settings
+systemd LoadCredentialEncrypted= ($CREDENTIALS_DIRECTORY), on Windows from
+DPAPI-protected files in the keys directory (SPEC §11.5.4, odnas/dpapi.py), or,
+for local dev, from an explicit key directory. Everything operational lives in the DB settings
 table and is edited in the admin GUI (odnas/settings_store.py).
 """
 from __future__ import annotations
@@ -44,6 +46,8 @@ class Config:
     broker_host: str = "127.0.0.1"
     broker_port: int = 8081
     cookie_secure: bool = True
+    host_os: str = ""            # v0.10: "" = the OS we run on; "linux" | "windows" (forcing is for tests)
+    internal_timers: str = ""    # v0.10: "" = on for Windows (no systemd timers, SPEC §11.5.5); "on" | "off"
     # [entra]
     tenant_id: str = ""
     client_id: str = ""
@@ -69,7 +73,7 @@ class Config:
     etc_dir: str = ""
     release_root: str = ""
     filters_template: str = ""
-    rclone_bin: str = "/usr/local/bin/rclone"
+    rclone_bin: str = ""         # "" = /usr/local/bin/rclone (Linux) or <Program Files>\SpringSync\bin\rclone.exe
     mount_helper: str = ""
     # [nas] bootstrap defaults (GUI settings override)
     nas_host: str = "unas.hotsprings.local"
@@ -80,23 +84,41 @@ class Config:
         return value or default
 
     @property
-    def p_db(self) -> str: return self._d(self.db_path, f"/var/lib/{self.slug}/db/{self.slug}.db")
+    def host(self) -> str:
+        from odnas.hostos import current_os
+        return self.host_os or current_os()
     @property
-    def p_state(self) -> str: return self._d(self.state_dir, f"/var/lib/{self.slug}")
+    def is_windows(self) -> bool: return self.host == "windows"
     @property
-    def p_log(self) -> str: return self._d(self.log_dir, f"/var/log/{self.slug}")
+    def timers_in_worker(self) -> bool:
+        return self.internal_timers == "on" or (self.internal_timers == "" and self.is_windows)
+
+    def _def(self, key: str) -> str:
+        from odnas.hostos import default_paths
+        return default_paths(self.host, self.slug)[key]
+
     @property
-    def p_run(self) -> str: return self._d(self.runtime_dir, f"/run/{self.slug}")
+    def p_db(self) -> str: return self._d(self.db_path, self._def("db"))
     @property
-    def p_mnt(self) -> str: return self._d(self.mount_root, f"/srv/{self.slug}/mnt")
+    def p_state(self) -> str: return self._d(self.state_dir, self._def("state"))
     @property
-    def p_etc(self) -> str: return self._d(self.etc_dir, f"/etc/{self.slug}")
+    def p_log(self) -> str: return self._d(self.log_dir, self._def("log"))
     @property
-    def p_keys(self) -> str: return self._d(self.keys_dir, f"{self.p_etc}/keys")
+    def p_run(self) -> str: return self._d(self.runtime_dir, self._def("run"))
     @property
-    def p_releases(self) -> str: return self._d(self.release_root, f"/opt/{self.slug}")
+    def p_mnt(self) -> str: return self._d(self.mount_root, self._def("mnt"))
     @property
-    def p_mount_helper(self) -> str: return self._d(self.mount_helper, f"/usr/local/lib/{self.slug}/mount-helper")
+    def p_etc(self) -> str: return self._d(self.etc_dir, self._def("etc"))
+    @property
+    def p_keys(self) -> str:
+        from odnas.hostos import join
+        return self.keys_dir or join(self, self.p_etc, "keys")
+    @property
+    def p_releases(self) -> str: return self._d(self.release_root, self._def("releases"))
+    @property
+    def p_rclone(self) -> str: return self._d(self.rclone_bin, self._def("rclone"))
+    @property
+    def p_mount_helper(self) -> str: return self._d(self.mount_helper, self._def("mount_helper"))
     @property
     def p_filters_template(self) -> str:
         return self._d(self.filters_template,
@@ -128,7 +150,12 @@ class Config:
 
     # ---- secrets (never logged, never in repr) --------------------------
     def read_secret(self, name: str) -> bytes:
-        """Read a secret file delivered by systemd credentials (preferred) or the dev keys dir."""
+        """Read a secret file delivered by systemd credentials (preferred) or the dev keys dir.
+        Windows: <keys>\\<name>.dpapi unprotected with DPAPI in the service account's user scope (SPEC §11.5.4);
+        a plain file is only accepted from $CREDENTIALS_DIRECTORY (dev/tests), never from the keys dir."""
+        if self.is_windows:
+            from odnas import dpapi
+            return dpapi.read_secret(self, name)
         cred_dir = os.environ.get("CREDENTIALS_DIRECTORY")
         for base in filter(None, (cred_dir, self.p_keys)):
             p = Path(base) / name
@@ -162,6 +189,10 @@ class Config:
             v = getattr(self, g)
             if v and not GUID_RE.match(v):
                 errs.append(f"{g} must be a group object ID (GUID)")
+        if self.host_os not in ("", "linux", "windows"):
+            errs.append("host_os must be empty, linux or windows")
+        if self.internal_timers not in ("", "on", "off"):
+            errs.append("internal_timers must be empty, on or off")
         if errs:
             raise ConfigError("; ".join(errs))
         return self
@@ -174,8 +205,11 @@ def load_config(path: str | None = None, env: dict[str, str] | None = None) -> C
     e = dict(os.environ if env is None else env)
     values: dict[str, object] = {}
     path = path or e.get("ODNAS_CONFIG")
+    if not path and os.name == "nt":   # services pass ODNAS_CONFIG too; this is the documented default
+        from odnas.hostos import default_paths
+        path = default_paths("windows", "springsync", e)["config_file"]
     if path and Path(path).is_file():
-        data = tomllib.loads(Path(path).read_text())
+        data = tomllib.loads(Path(path).read_text(encoding="utf-8-sig"))   # Notepad may add a BOM
         for sec in _SECTIONS:
             if sec == "google":   # SPEC §8.2: [google] client_id / allowed_domain -> google_client_id / ...
                 values.update({(k if k.startswith("google_") else "google_" + k): v

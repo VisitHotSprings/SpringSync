@@ -41,7 +41,7 @@ def test_bisync_command_matches_spec(cfg):
     assert flag_value(cmd, "--retries") == "3" and flag_value(cmd, "--retries-sleep") == "30s"
     assert flag_value(cmd, "--low-level-retries") == "10"
     assert flag_value(cmd, "--transfers") == "4" and flag_value(cmd, "--checkers") == "8"
-    assert flag_value(cmd, "--user-agent") == "NONISV|VisitHotSprings|SpringSync/0.9"
+    assert flag_value(cmd, "--user-agent") == "NONISV|VisitHotSprings|SpringSync/0.10"
     assert flag_value(cmd, "--workdir").endswith(f"/bisync/{UID}")
     assert flag_value(cmd, "--log-file").endswith(f"/runs/{UID}/42.json")
     assert flag_value(cmd, "--filters-file").endswith("bisync-filters.txt")
@@ -87,7 +87,8 @@ def test_rclone_config_broker_mode(cfg, db, kr, entra):
     strat = BrokerTokenStrategy(cfg, db, broker)
     auth = strat.prepare(uid, 5)
     text = auth.config_path.read_text()
-    assert oct(os.stat(auth.config_path).st_mode & 0o777) == "0o600"
+    if os.name != "nt":   # Windows: the ProgramData ACL protects it (POSIX mode bits do not apply)
+        assert oct(os.stat(auth.config_path).st_mode & 0o777) == "0o600"
     cp = configparser.ConfigParser(interpolation=None)
     cp.read_string(text)
     sec = cp[remote_name(uid)]

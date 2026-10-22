@@ -4,4 +4,4 @@ The Python package name is deliberately neutral (`odnas`); the product name
 and slug (paths, unit names, check/archive file names) come from config.
 """
 
-__version__ = "0.9.1"
+__version__ = "0.10.0"

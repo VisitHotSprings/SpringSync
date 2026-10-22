@@ -20,7 +20,8 @@ from odnas.bisync import baseline_digest
 from odnas.config import TOKEN_MODE_BROKER, Config
 from odnas.crypto import Keyring
 from odnas.entra import EntraClient
-from odnas.nas import V_AUTH_FAILED, V_OK, BackupTarget, MountHelperClient, NasAccessProvider, provider_from_settings
+from odnas.nas import (V_AUTH_FAILED, V_OK, BackupTarget, MountHelperClient, NasAccessProvider, default_share_client,
+                       provider_from_settings)
 from odnas.notify import Alert, Alerter, Notifier
 from odnas.runner import (GOOGLE_APP_FLAG, JobRunner, ProcessRunner, _recipients, accept_expired,
                           expire_accept_approvals, set_nas_global_pause, sweep_runtime)
@@ -28,6 +29,7 @@ from odnas.scheduler import (ThrottleGovernor, assign_offsets, in_window, second
                              weekly_check_due)
 from odnas.tokens import BrokerTokenStrategy, TmpfsConfigStrategy, TokenBroker
 
+DAILY_JOBS = (("backup", 2, 30), ("maint", 3, 30))   # Central time; the Linux timers (SPEC §10.3/§11.3)
 NAS_HEALTH_INTERVAL_MIN = 15   # SPEC v0.7 health check (Option B)
 BACKUP_TEST_FLAG = "backup_test_requested"   # v0.9: Settings "Test" button for the backup NAS
 log = logging.getLogger("odnas.worker")
@@ -44,7 +46,7 @@ class Worker:
         self.broker = TokenBroker(db, kr, entra, cfg, google=google)   # google: lazily HttpGoogleClient
         self.strategy = BrokerTokenStrategy(cfg, db, self.broker) if cfg.token_mode == TOKEN_MODE_BROKER \
             else TmpfsConfigStrategy(cfg, db, kr)
-        self.helper = helper or MountHelperClient(cfg)
+        self.helper = helper or default_share_client(cfg)
         self.governor = ThrottleGovernor()
         self.provider_factory = provider_factory or (lambda: provider_from_settings(cfg, self.settings(), self.helper))
         self.backup = backup or BackupTarget(cfg, self.helper)
@@ -54,6 +56,7 @@ class Worker:
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="job")
         self._stop = threading.Event()
+        self._instance_lock = None
 
     # ---- settings / flags ---------------------------------------------
     def settings(self):
@@ -74,6 +77,7 @@ class Worker:
 
     # ---- startup ------------------------------------------------------
     def startup(self) -> None:
+        self._single_instance()
         n = sweep_runtime(self.cfg)
         if n:
             log.warning("swept %d stale per-run secret file(s)", n)
@@ -381,11 +385,76 @@ class Worker:
                              "safety_abort")
         self.db.audit("system", "user_offboarded", uid, {"crypto_erase": True, "final_sync": bool(u["final_sync_requested"])})
 
+    def _single_instance(self) -> None:
+        """v0.10: exactly one worker per host (it owns rclone, SMB sessions and the bisync workdirs). The OS
+        releases the lock if the process dies. fcntl on Linux, msvcrt on Windows (odnas/hostos.py)."""
+        from odnas.hostos import FileLock, LockBusy
+        if self._instance_lock is not None:
+            return
+        try:
+            self._instance_lock = FileLock(Path(self.cfg.p_state) / "worker.lock").acquire()   # real OS lock API
+        except LockBusy:
+            raise SystemExit("another worker is already running on this host") from None
+
+    # ---- in-worker daily jobs (Windows has no systemd timers; SPEC §11.5.5) ----------------------
+    def daily_jobs(self, now: datetime) -> list[str]:
+        """backup at 02:30 and maint at 03:30 Central, once per local day, when cfg.timers_in_worker.
+        maint waits until no job is running (it sweeps per-run files). Returns what ran."""
+        if not self.cfg.timers_in_worker:
+            return []
+        from odnas.timefmt import DISPLAY_TZ
+        local = now.astimezone(DISPLAY_TZ)
+        today = local.date().isoformat()
+        ran = []
+        for name, hh, mm in DAILY_JOBS:
+            if (local.hour, local.minute) < (hh, mm):
+                continue
+            hb = self.db.heartbeat(f"daily_{name}")
+            if hb and hb["detail"].startswith(today):
+                continue
+            if name == "maint" and self.running():
+                continue
+            try:
+                if name == "backup":
+                    from odnas.maint import run_backup
+                    run_backup(self.cfg, self.db, extra_dirs=())
+                else:
+                    from odnas.maint import run_maint
+                    run_maint(self.cfg, self.db, self.alerter)
+                self.db.beat(f"daily_{name}", f"{today} ok")
+            except Exception as e:
+                log.exception("daily %s failed", name)
+                self.db.beat(f"daily_{name}", f"{today} failed: {type(e).__name__}")
+                self.alerter.raise_(Alert("unit_failed", "critical", f"daily {name} failed: {type(e).__name__}"))
+            ran.append(name)
+        return ran
+
+    # ---- stop (signal on Linux, service control on Windows) ------------------------------------
+    def request_stop(self, drain: bool = True) -> None:
+        """Stop starting jobs, ask running rclone processes to stop gracefully (bisync writes its state),
+        and let serve_forever wait for them. Windows service stop and pre-shutdown call this."""
+        self._stop.set()
+        if drain:
+            try:
+                self.drain_flag.parent.mkdir(parents=True, exist_ok=True)
+                self.drain_flag.touch()
+            except OSError:
+                pass
+        if self.cfg.is_windows and hasattr(self.runner.proc, "stop_all"):
+            n = self.runner.proc.stop_all()
+            if n:
+                log.info("asked %d running rclone process(es) to stop", n)
+                grace = getattr(self.runner.proc, "grace_s", 120.0)
+                t = threading.Timer(grace, self.runner.proc.kill_all)   # same 120 s as a timeout (§11.5.6)
+                t.daemon = True
+                t.start()
+
     # ---- loop ---------------------------------------------------------
     def serve_forever(self) -> None:
         self.startup()
-        signal.signal(signal.SIGTERM, lambda *_: self._stop.set())
-        signal.signal(signal.SIGINT, lambda *_: self._stop.set())
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGTERM, lambda *_: self._stop.set())
+            signal.signal(signal.SIGINT, lambda *_: self._stop.set())
         t = threading.Thread(target=self._serve_http, daemon=True)
         t.start()
         while not self._stop.is_set():
@@ -393,9 +462,18 @@ class Worker:
                 self.tick()
             except Exception:
                 log.exception("tick failed")
+            try:
+                self.daily_jobs(D.utcnow())
+            except Exception:
+                log.exception("daily jobs failed")
             self._stop.wait(60)
-        log.info("stopping: waiting for running jobs (rclone handles SIGTERM via systemd KillMode=mixed)")
+        log.info("stopping: waiting for running jobs (Linux: rclone gets SIGTERM via systemd KillMode=mixed; "
+                 "Windows: CTRL_BREAK via request_stop)")
         self._pool.shutdown(wait=True, cancel_futures=True)
+        self.drain_flag.unlink(missing_ok=True)   # startup clears it too
+        if self._instance_lock is not None:
+            self._instance_lock.release()
+            self._instance_lock = None
 
     def _serve_http(self) -> None:
         import uvicorn

@@ -27,3 +27,40 @@ jobs:
           echo "349ac8fba6ff65d6247043f1750cdcb518ec5d500ef91463a10d37c0ccdf3702  r.zip" | sha256sum -c -
           unzip -q r.zip && echo "ODNAS_TEST_RCLONE=$PWD/rclone-v1.75.2-linux-amd64/rclone" >> "$GITHUB_ENV"
       - run: python -m pytest -q
+
+  # v0.10: the Windows host layer on a real Windows runner (SPEC §12: paths/ACLs, DPAPI round trip,
+  # job objects / CTRL_BREAK outside a service, PowerShell parse + PSScriptAnalyzer). Not the lab tests
+  # T-W1..T-W4 (those need the real PC, services and the NAS).
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.13" }
+      - run: python -m pip install --require-hashes "--only-binary=:all:" -r requirements-windows.lock
+      - name: Windows host-layer tests (+ the update.ps1 smoke subset)
+        run: |
+          python -m pytest -q -p no:cacheprovider -rs tests/test_v10_windows.py tests/test_v10_packaging.py
+          python -m pytest -q -p no:cacheprovider --smoke tests
+      - name: PowerShell parse (Windows PowerShell 5.1 and PowerShell 7)
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem deploy/windows -Include *.ps1,*.psm1,*.psd1 -Recurse
+          $bad = 0
+          foreach ($f in $files) {
+            $tok = $null; $err = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tok, [ref]$err)
+            foreach ($e in $err) { Write-Host "$($f.Name): $($e.Extent.StartLineNumber): $($e.Message)"; $bad++ }
+          }
+          $ps51 = 'foreach ($f in Get-ChildItem deploy/windows -Include *.ps1,*.psm1 -Recurse) { $t=$null; $e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName,[ref]$t,[ref]$e); foreach ($x in $e) { Write-Host "$($f.Name) (5.1): $($x.Message)"; exit 1 } }'
+          powershell.exe -NoProfile -Command $ps51
+          if ($LASTEXITCODE -ne 0) { $bad++ }
+          if ($bad) { exit 1 }
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Scope CurrentUser -Force
+          $r = Invoke-ScriptAnalyzer -Path deploy/windows -Recurse -Severity Error,Warning `
+               -ExcludeRule PSAvoidUsingWriteHost,PSUseShouldProcessForStateChangingFunctions,PSUseSingularNouns
+          $r | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
+          if ($r | Where-Object Severity -eq 'Error') { exit 1 }

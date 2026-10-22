@@ -32,10 +32,11 @@ class JobPaths:
         return remote_name(self.uid, self.provider)
 
     def path2(self) -> str:
-        sub = self.path2_subdir.strip("/")
-        if ".." in sub.split("/"):
-            raise ValueError("path2_subdir must not contain ..")
-        return f"{self.mount_path}/{sub}" if sub else self.mount_path
+        from odnas.hostos import under
+        try:
+            return under(self.mount_path, self.path2_subdir)
+        except ValueError:
+            raise ValueError("path2_subdir must not contain ..") from None
 
 
 def filters_path(cfg: Config) -> Path:
@@ -61,7 +62,8 @@ def baseline_digest(cfg: Config) -> str:
 
 
 def log_path(cfg: Config, uid: str, run_id: int) -> str:
-    return f"{cfg.p_log}/runs/{uid}/{run_id}.json"
+    from odnas.hostos import join
+    return join(cfg, cfg.p_log, "runs", uid, f"{run_id}.json")
 
 
 def build_bisync(cfg: Config, jp: JobPaths, *, max_delete_pct: int, resync: bool = False, dry_run: bool = False,
@@ -78,12 +80,13 @@ def build_bisync(cfg: Config, jp: JobPaths, *, max_delete_pct: int, resync: bool
         raise ValueError("max_delete_pct out of range")
     if force and resync:
         raise ValueError("--force is never combined with --resync")
+    from odnas.hostos import join, under
     remote = jp.remote
     path2 = jp.path2()
     cmd = [
-        cfg.rclone_bin, "bisync", f"{remote}:", path2,
+        cfg.p_rclone, "bisync", f"{remote}:", path2,
         "--config", jp.config_path,
-        "--workdir", f"{cfg.p_state}/bisync/{jp.uid}",
+        "--workdir", join(cfg, cfg.p_state, "bisync", jp.uid),
         "--compare", "size,modtime,checksum", "--slow-hash-sync-only",
         "--resilient", "--recover", "--max-lock", "2m",
         "--conflict-resolve", "newer", "--conflict-loser", "num",
@@ -91,7 +94,7 @@ def build_bisync(cfg: Config, jp: JobPaths, *, max_delete_pct: int, resync: bool
         "--max-delete", str(max_delete_pct),
         "--check-access", "--check-filename", cfg.check_filename,
         "--backup-dir1", f"{remote}:{cfg.archive_dirname}",
-        "--backup-dir2", f"{jp.mount_path}/{cfg.archive_dirname}",
+        "--backup-dir2", under(jp.mount_path, cfg.archive_dirname),
         "--filters-file", str(filters_path(cfg)),
         "--create-empty-src-dirs",
         "--disable", "ListR",
@@ -116,7 +119,7 @@ def build_bisync(cfg: Config, jp: JobPaths, *, max_delete_pct: int, resync: bool
 
 def build_check(cfg: Config, jp: JobPaths) -> list[str]:
     """Weekly verification (SPEC §9.3): size+hash, both directions; only the mismatch count is reported."""
-    return [cfg.rclone_bin, "check", f"{jp.remote}:", jp.path2(), "--config", jp.config_path,
+    return [cfg.p_rclone, "check", f"{jp.remote}:", jp.path2(), "--config", jp.config_path,
             "--filter-from", str(filters_path(cfg)), "--exclude", f"/{cfg.check_filename}",
             "--disable", "ListR", *ENC, "--tpslimit", "4", "--checkers", "8", "--user-agent", cfg.user_agent,
             "--use-json-log", "--log-level", "INFO", "--log-file", log_path(cfg, jp.uid, jp.run_id)]
@@ -124,17 +127,23 @@ def build_check(cfg: Config, jp: JobPaths) -> list[str]:
 
 def build_lsjson(cfg: Config, target: str, config_path: str) -> list[str]:
     """Preflight listing (names/sizes only, never contents)."""
-    return [cfg.rclone_bin, "lsjson", target, "-R", "--files-only", "--no-mimetype", "--no-modtime",
+    return [cfg.p_rclone, "lsjson", target, "-R", "--files-only", "--no-mimetype", "--no-modtime",
             "--config", config_path, "--filter-from", str(filters_path(cfg)), "--disable", "ListR", *ENC,
             "--tpslimit", "4", "--user-agent", cfg.user_agent]
 
 
 def build_touch_check_file(cfg: Config, target_root: str, config_path: str) -> list[str]:
-    return [cfg.rclone_bin, "touch", f"{target_root.rstrip('/')}/{cfg.check_filename}" if not target_root.endswith(":")
-            else f"{target_root}{cfg.check_filename}", "--config", config_path, *ENC, "--user-agent", cfg.user_agent]
+    from odnas.hostos import is_windows_path, under
+    if target_root.endswith(":"):
+        target = f"{target_root}{cfg.check_filename}"
+    elif is_windows_path(target_root):
+        target = under(target_root, cfg.check_filename)
+    else:
+        target = f"{target_root.rstrip('/')}/{cfg.check_filename}"
+    return [cfg.p_rclone, "touch", target, "--config", config_path, *ENC, "--user-agent", cfg.user_agent]
 
 
 def build_lsf_root(cfg: Config, target: str, config_path: str) -> list[str]:
     """SPEC v0.9 §9.7.2 guard 2: `rclone lsf --max-depth 1` of a root (names only) to see the check file."""
-    return [cfg.rclone_bin, "lsf", target, "--max-depth", "1", "--files-only", "--config", config_path, *ENC,
+    return [cfg.p_rclone, "lsf", target, "--max-depth", "1", "--files-only", "--config", config_path, *ENC,
             "--tpslimit", "4", "--user-agent", cfg.user_agent]

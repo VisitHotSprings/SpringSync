@@ -4,8 +4,9 @@ settings change plus a per-user migration, not a rewrite.
 Option A (pilot): each user's own UniFi file-service login, //<nas>/Personal-Drive.
 Option B: //<nas>/Home-<user> per user, one svc-sync login, mounts kept persistent.
 
-All mounting goes through the root-owned mount helper via `sudo -n` (one command
-only, see deploy/sudoers). The worker writes a 0600 credentials file and a .unc
+On Linux all mounting goes through the root-owned mount helper via `sudo -n` (one
+command only, see deploy/sudoers). On Windows (v0.10) odnas/winshare.py opens a
+per-run SMB session to the UNC path instead (same call/mount_path interface). The worker writes a 0600 credentials file and a .unc
 file to tmpfs; the helper reads them, mounts, and the worker shreds them in finally.
 """
 from __future__ import annotations
@@ -99,6 +100,18 @@ class MountHelperClient:
 
     def mount_path(self, ident: str) -> str:
         return str(Path(self.cfg.p_mnt) / ident)
+
+    def is_connected(self, ident: str) -> bool:
+        return os.path.ismount(self.mount_path(ident))
+
+
+def default_share_client(cfg: Config):
+    """Linux: the root mount helper via sudo. Windows (v0.10, SPEC §11.5.3): per-run SMB sessions to UNC
+    paths with WNetAddConnection2 (odnas/winshare.py)."""
+    if cfg.is_windows:
+        from odnas.winshare import WindowsShareClient
+        return WindowsShareClient(cfg)
+    return MountHelperClient(cfg)
 
 
 def _status(code: int) -> str:
@@ -202,7 +215,7 @@ class SharedHomeProvider:
 
 
 def provider_from_settings(cfg: Config, s, helper: MountHelperClient | None = None) -> NasAccessProvider:
-    helper = helper or MountHelperClient(cfg)
+    helper = helper or default_share_client(cfg)
     if s.nas_option == "B":
         return SharedHomeProvider(cfg, helper, s.nas_host, s.nas_shared_template, s.nas_svc_username,
                                   s.secret("nas_svc_password"), s.nas_domain, s.nas_health_share)
@@ -235,7 +248,7 @@ class BackupTarget:
     removed) before any one-way run. SpringSync never deletes anything from the backup target."""
 
     def __init__(self, cfg: Config, helper: MountHelperClient | None = None):
-        self.cfg, self.helper = cfg, helper or MountHelperClient(cfg)
+        self.cfg, self.helper = cfg, helper or default_share_client(cfg)
         self._lock = threading.Lock()
 
     def unc(self, s) -> str:
@@ -245,9 +258,8 @@ class BackupTarget:
         if not (s.backup_nas_host and s.backup_nas_share and s.backup_nas_username
                 and s.secret_is_set("backup_nas_password")):
             return BackupResult(V_ERROR, message="backup NAS not configured (host, share, login)")
-        path = self.helper.mount_path(ARCHIVE_IDENT)
         with self._lock:
-            if not os.path.ismount(path):
+            if not self._connected():
                 try:
                     code, msg = self.helper.call("mount", ARCHIVE_IDENT, self.unc(s), s.backup_nas_username,
                                                  s.secret("backup_nas_password"), s.nas_domain)
@@ -255,11 +267,19 @@ class BackupTarget:
                     return BackupResult(V_ERROR, message=str(e))
                 if code != H_OK:
                     return BackupResult(_status(code), message=f"backup NAS mount failed: {msg}"[:300])
+            path = self.helper.mount_path(ARCHIVE_IDENT)   # Windows: known only once connected
         return BackupResult(V_OK, path, True)
+
+    def _connected(self) -> bool:
+        f = getattr(self.helper, "is_connected", None)
+        if f is not None:
+            return bool(f(ARCHIVE_IDENT))
+        return os.path.ismount(self.helper.mount_path(ARCHIVE_IDENT))
 
     def prepare(self, s, uid: str, user_mount: str) -> BackupResult:
         if s.pull_backup_target == TARGET_SAME_SHARE:
-            res = BackupResult(V_OK, f"{user_mount.rstrip('/')}/{self.cfg.archive_dirname}", False)
+            from odnas.hostos import subdir_join
+            res = BackupResult(V_OK, subdir_join(self.cfg, user_mount, self.cfg.archive_dirname), False)
         else:
             res = self._mount(s)
             if not res.ok:

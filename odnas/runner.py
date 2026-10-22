@@ -8,7 +8,6 @@ from datetime import timedelta
 import logging
 import os
 import re
-import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,30 +43,88 @@ class ProcResult:
 
 
 class ProcessRunner:
-    """Runs rclone; on timeout sends SIGINT once (bisync graceful shutdown), waits `grace_s`, then SIGKILL."""
+    """Runs rclone with a worker-enforced wall-clock limit.
+    Linux: own session; on timeout SIGINT once (bisync graceful shutdown), wait `grace_s`, then SIGKILL the group.
+    Windows (v0.10, SPEC §11.5.6): own process group + Job Object (kill-on-close); on timeout CTRL_BREAK_EVENT
+    once, wait `grace_s`, then TerminateJobObject (fallback taskkill /T /F). [T-W3: untested on real Windows.]
+    `stop_all()` sends the polite stop to every running rclone (Windows service stop / pre-shutdown drain;
+    on Linux systemd's KillMode=mixed does this)."""
 
-    def __init__(self, grace_s: float = 120.0):
-        self.grace_s = grace_s
+    def __init__(self, grace_s: float = 120.0, host: str | None = None, _popen=subprocess.Popen, _job=None):
+        from odnas.hostos import current_os
+        self.grace_s, self.host = grace_s, host or current_os()
+        self._popen, self._job_factory = _popen, _job
+        import threading
+        self._live: dict[int, object] = {}
+        self._lk = threading.Lock()
+
+    def _new_job(self):
+        if self._job_factory is not None:
+            return self._job_factory()
+        from odnas.hostos import WinJob
+        return WinJob()
+
+    def stop_all(self) -> int:
+        from odnas.hostos import graceful_stop
+        with self._lk:
+            procs = list(self._live.values())
+        for p in procs:
+            try:
+                graceful_stop(p, self.host)
+            except Exception:
+                log.exception("graceful stop failed")
+        return len(procs)
+
+    def kill_all(self) -> int:
+        from odnas.hostos import hard_kill
+        with self._lk:
+            procs = list(self._live.values())
+        for p in procs:
+            try:
+                if p.poll() is None:
+                    hard_kill(p, self.host, getattr(p, "_odnas_job", None))
+            except Exception:
+                log.exception("hard kill failed")
+        return len(procs)
 
     def run(self, cmd: list[str], env: dict[str, str], timeout_s: float | None, capture: bool = False,
             stderr_path: str | None = None) -> ProcResult:
+        from odnas.hostos import WINDOWS, graceful_stop, hard_kill, popen_kwargs
         err = open(stderr_path, "ab") if stderr_path else subprocess.DEVNULL
+        job = None
         try:
-            p = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.PIPE if capture else subprocess.DEVNULL, stderr=err,
-                                 start_new_session=True)
+            if self.host == WINDOWS:
+                env = {**env, "SystemRoot": os.environ.get("SystemRoot", r"C:\Windows")}  # Go needs it on Windows
+            p = self._popen(cmd, env=env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE if capture else subprocess.DEVNULL, stderr=err,
+                            **popen_kwargs(self.host))
+            if self.host == WINDOWS:
+                job = self._new_job()
+                if not job.assign(p):
+                    log.warning("rclone not in a job object; timeout kill falls back to taskkill /T")
+                try:
+                    p._odnas_job = job
+                except AttributeError:
+                    pass
+            with self._lk:
+                self._live[p.pid] = p
             try:
                 out, _ = p.communicate(timeout=timeout_s)
                 return ProcResult(p.returncode, False, (out or b"").decode("utf-8", "replace"))
             except subprocess.TimeoutExpired:
-                p.send_signal(signal.SIGINT)
+                graceful_stop(p, self.host)
                 try:
                     out, _ = p.communicate(timeout=self.grace_s)
                 except subprocess.TimeoutExpired:
-                    os.killpg(p.pid, signal.SIGKILL)
+                    hard_kill(p, self.host, job)
                     out, _ = p.communicate()
                 return ProcResult(p.returncode, True, (out or b"").decode("utf-8", "replace"))
+            finally:
+                with self._lk:
+                    self._live.pop(p.pid, None)
         finally:
+            if job is not None:
+                job.close()
             if stderr_path:
                 err.close()
 
@@ -146,7 +203,7 @@ class JobRunner:
                  backup: BackupTarget | None = None):
         self.cfg, self.db, self.kr, self.strategy = cfg, db, kr, strategy
         self.provider_factory, self.settings_loader = provider_factory, settings_loader
-        self.alerter, self.proc = alerter, proc or ProcessRunner()
+        self.alerter, self.proc = alerter, proc or ProcessRunner(host=cfg.host)
         self.governor = governor or ThrottleGovernor()
         self.backup = backup or BackupTarget(cfg)
 
@@ -412,7 +469,7 @@ class JobRunner:
             listings[side] = json.loads(pr.stdout or "[]")
         quota = None
         if prov == cloud.PROVIDER_OD:
-            pa = self.proc.run([self.cfg.rclone_bin, "about", f"{jp.remote}:", "--json", "--config", jp.config_path,
+            pa = self.proc.run([self.cfg.p_rclone, "about", f"{jp.remote}:", "--json", "--config", jp.config_path,
                                 "--user-agent", self.cfg.user_agent], env, 300, capture=True)
             try:
                 about = json.loads(pa.stdout or "{}")

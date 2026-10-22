@@ -1,5 +1,86 @@
 # Changelog
 
+## 0.10.0 (unreleased, lab build, 2026-10-22). Windows 11 Pro host
+SPEC §11.5 (Windows host) and §11.6 (Ubuntu → Windows). One codebase: the Ubuntu host is unchanged and
+the full Linux suite still passes. Nothing live: no Microsoft, Google, NAS, Entra or DNS calls were made,
+and nothing ran on a real Windows PC (see "Not verified" below). No schema change, so no migration.
+
+### Added: host layer (`odnas/hostos.py`)
+- `host_os` ("" = the OS it runs on; `linux` / `windows` can be forced for tests) and `internal_timers`
+  ("" = on for Windows). Windows defaults: data in `%ProgramData%\SpringSync`, programs in
+  `%ProgramFiles%\SpringSync`; every `p_*` path goes through one table, so Linux paths are byte-for-byte
+  the same as 0.9.1.
+- Path helpers that keep a user root inside its share (`under` refuses `..`), UNC helpers, case-insensitive
+  prefix checks for UNC paths.
+- `FileLock` (fcntl on Linux, msvcrt on Windows); the worker takes `state/worker.lock` so only one runs.
+- rclone processes on Windows: new process group, no window, a Job Object (kill-on-close), graceful stop by
+  CTRL_BREAK (AttachConsole method, then `send_signal`), hard stop after 120 s (`TerminateJobObject` /
+  `taskkill /T /F`). `cfg.p_rclone` replaces `cfg.rclone_bin` in bisync/pull/runner.
+
+### Added: NAS on Windows (`odnas/winshare.py`)
+- UNC access through the WNet API (`WNetAddConnection2W`, deviceless, temporary). The password stays in
+  memory for the call; it is never on a command line, in a log or in Credential Manager. Same refcounting
+  and error codes as the Linux mount helper, so `nas.py` callers don't change. Also used for the backup NAS.
+- Error 1219 (one login per server per session): users on the same server with different logins run one
+  after another; a stale connection is cancelled and retried once; a backup NAS on the same server with a
+  different login fails fast with a clear message (use Option B).
+
+### Added: secrets with DPAPI (`odnas/dpapi.py`)
+- Service secrets are DPAPI-protected (user scope, svc-springsync) in `ProgramData\SpringSync\keys\*.dpapi`.
+  The installer writes plaintext to `keys\incoming`; the service ingests it at start (round-trip checked,
+  plaintext overwritten and deleted). `odnas secrets ingest|status`.
+- `odnas keygen` creates `data.key`, the Entra certificate (`entra-app.crt`/`.key`, RSA-2048, 730 days) and
+  Administrators-only escrow copies. It never replaces existing keys.
+
+### Added: Windows services (`odnas/winservice.py`, `deploy/windows/svc.py`)
+- `springsync-web`, `springsync-worker` (pywin32 on the private Python) and `springsync-caddy` (Caddy's own
+  service support), all under the low-privilege `svc-springsync` account: automatic start, restart on
+  failure (3 times), run with nobody signed in. The worker accepts pre-shutdown (150 s) and drains.
+- Timers run inside the worker on Windows: database backup 02:30 and maintenance 03:30 Central, once per
+  day each. Maintenance also writes the monthly audit copy `logs\audit\audit-YYYY-MM.jsonl`.
+- File logs (`logs\<role>.log`, rotated) and a self-check at start (`logs\doctor-service.json`).
+
+### Added: `odnas doctor` (both hosts)
+- Paths, database, secrets (warns while escrow copies are still on the PC), rclone version + an `lsf` with
+  the pinned encoding, HTTP health, Caddy modules + Caddyfile, NAS TCP 445, Windows long paths.
+  `--json` for scripts. Also `odnas audit-event` for install/update/rollback records.
+
+### Added: Windows packaging (`deploy/windows/`)
+- `install.ps1` (pre-flight: Windows 11 Pro, Administrator, BitLocker, TPM, sleep/hibernate with
+  `-SetPowerSettings`, active hours with `-SetActiveHours`, long paths; account, folders + icacls, private
+  Python, rclone, settings, keys, database, services, firewall rule for TCP 443 and 80 (redirect) to caddy.exe, doctor). Safe to re-run;
+  `-WhatIf` shows the plan.
+- `update.ps1` (side-by-side, smoke tests, drain, DB backup, switch, 60 s health check, automatic switch
+  back; keeps 3 versions), `rollback.ps1` (`-RestoreDb`), `uninstall.ps1` (keeps data unless `-PurgeData`
+  and a typed `PURGE`), `set-secret.ps1` (hidden prompt).
+- Pinned and SHA-256-checked: Python 3.13.17 embeddable, pip 26.2.2, rclone v1.75.2, Caddy v2.11.7 with
+  googleclouddns v1.1.0 (`pins.psd1`; same rclone/Caddy pins as `install.sh`). `requirements-windows.lock`
+  = `requirements.lock` + pywin32, tzdata, colorama, all hashed.
+- Antivirus-friendly: no PyInstaller/Nuitka/packed exe, plain readable PowerShell 5.1 (no
+  `-EncodedCommand`, no `Invoke-Expression`, no hidden windows beyond the services), `Unblock-File` only on
+  the package's own files, Defender/ThreatDown settings untouched. `SHA256SUMS.txt` inside the zip and next
+  to it. Scripts are ready for Authenticode signing (not signed).
+- `build-release.sh` (zip from `git archive` + verified vendor files), `build-caddy-windows.sh` (xcaddy;
+  needs Go module access, not run here), `ps_static_check.py` (PowerShell rule check used in tests).
+- Guide: `docs/INSTALL-WINDOWS.md` and `.pdf` (numbered copy-paste steps; Entra, DNS and NAS steps are
+  marked "needs Mark's OK").
+- CI: a `windows` job (windows-2025) runs the Windows tests on real Windows, parses the scripts in
+  PowerShell 5.1 and 7, and runs PSScriptAnalyzer. Additions only to `ci.yml`.
+
+### Changed
+- TOML config is read as UTF-8 with or without a BOM (PowerShell 5.1 writes a BOM).
+- Token files are written as UTF-8 with no newline translation.
+
+### Deviations from the spec (OPEN-QUESTIONS.md §H)
+Python 3.13 embeddable instead of the 3.12 installer; zip install instead of `git clone` with a deploy
+key; WNet with database-stored NAS logins instead of Credential Manager; pywin32 instead of WinSW;
+Caddy service named `springsync-caddy`; per-run rclone configs on disk (BitLocker required; no tmpfs).
+
+### Not verified (no Windows PC, no Microsoft hosts)
+The PowerShell scripts were never run (no PowerShell here; static checks only). The Windows code ran on
+Linux against mocks. Lab tests T-W1 to T-W4 (NAS 1219, CTRL_BREAK stop, reboot during a run, Option A vs B)
+are still to do. Caddy for Windows was not built.
+
 ## CI fix (2026-10-22, no app code change)
 - GitHub CI: the secret scan now runs the free gitleaks CLI v8.30.1, pinned by SHA-256, instead of
   `gitleaks-action`, which needs a paid license for organization repos and failed the first run.

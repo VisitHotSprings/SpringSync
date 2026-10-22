@@ -41,9 +41,10 @@ STAMP_FMT = "%Y-%m-%d_%H%M%S"   # UTC; one backup folder per run
 
 def backup_dir(root: str, uid: str, stamp: str, per_user: bool = True) -> str:
     """<backup NAS mount>/<user_id>/<stamp>, or (same_share) <user share>/.springsync-archive/<stamp>."""
-    if not root.startswith("/") or any(c in root for c in "\r\n") or ".." in root.split("/"):
+    from odnas.hostos import is_local_path, under
+    if not is_local_path(root) or ".." in root.replace("\\", "/").split("/"):
         raise ValueError("backup target must be an absolute local path")
-    return f"{root.rstrip('/')}/{uid}/{stamp}" if per_user else f"{root.rstrip('/')}/{stamp}"
+    return under(root, uid, stamp) if per_user else under(root, stamp)
 
 
 def build_pull(cfg: Config, jp: JobPaths, *, op: str, backup: str, log_file: str, dry_run: bool = False,
@@ -64,16 +65,17 @@ def build_pull(cfg: Config, jp: JobPaths, *, op: str, backup: str, log_file: str
     if combined and not dry_run:
         raise ValueError("--combined counting is a dry-run")
     src, dst = f"{jp.remote}:", jp.path2()
-    if not dst.startswith("/") or ":" in dst:
+    from odnas.hostos import is_local_path, norm_prefix, under
+    if not is_local_path(dst):
         raise ValueError("one-way pull destination must be the local NAS mount")
-    if not backup.startswith("/") or ":" in backup:
+    if not is_local_path(backup):
         raise ValueError("backup target must be a local path")
-    inside = backup.rstrip("/").startswith(dst.rstrip("/") + "/")
-    if inside and not backup.startswith(f"{jp.mount_path.rstrip('/')}/{cfg.archive_dirname}/"):
+    inside = norm_prefix(backup).startswith(norm_prefix(dst) + "/")
+    if inside and not norm_prefix(backup).startswith(norm_prefix(under(jp.mount_path, cfg.archive_dirname)) + "/"):
         # rclone: --backup-dir must not overlap the destination unless a filter excludes it
         raise ValueError("a backup dir inside the destination must be under the filtered archive folder")
     cmd = [
-        cfg.rclone_bin, op, src, dst,
+        cfg.p_rclone, op, src, dst,
         "--config", jp.config_path,
         "--backup-dir", backup,
         "--filter-from", str(filters_path(cfg)),
@@ -103,7 +105,7 @@ def build_pull(cfg: Config, jp: JobPaths, *, op: str, backup: str, log_file: str
 def build_check_one_way(cfg: Config, jp: JobPaths, log_file: str, skip_gdocs_flag: bool = False) -> list[str]:
     """Weekly verification for one-way users: every cloud file must be on the NAS and identical; NAS-only
     files are expected (`--one-way`)."""
-    cmd = [cfg.rclone_bin, "check", f"{jp.remote}:", jp.path2(), "--one-way", "--config", jp.config_path,
+    cmd = [cfg.p_rclone, "check", f"{jp.remote}:", jp.path2(), "--one-way", "--config", jp.config_path,
            "--filter-from", str(filters_path(cfg)), "--exclude", f"/{cfg.check_filename}",
            "--disable", "ListR", *ENC, "--tpslimit", "4", "--checkers", "8", "--user-agent", cfg.user_agent,
            "--use-json-log", "--log-level", "INFO", "--log-file", log_file]

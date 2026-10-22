@@ -23,3 +23,9 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+
+# v0.10 Windows host: DPAPI blobs, escrow copies, release builds
+*.dpapi
+escrow/
+svc-springsync-password.txt
+/dist/

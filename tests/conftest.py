@@ -38,6 +38,9 @@ def cfg(tmp_path, monkeypatch):
         "ODNAS_MOUNT_ROOT": str(tmp_path / "mnt"), "ODNAS_KEYS_DIR": str(keys), "ODNAS_ETC_DIR": str(tmp_path / "etc"),
         "ODNAS_COOKIE_SECURE": "false", "ODNAS_GROUP_USERS": G_USERS, "ODNAS_GROUP_ADMINS": G_ADMINS,
         "ODNAS_GROUP_AUDITORS": G_AUDIT, "ODNAS_RCLONE_BIN": "rclone",
+        # v0.10: the shared fixture is the Linux host so these tests mean the same when the smoke subset runs
+        # on the Windows host (update.ps1); the Windows branch has its own tests (test_v10_windows.py).
+        "ODNAS_HOST_OS": "linux",
     }
     return load_config(env=env)
 

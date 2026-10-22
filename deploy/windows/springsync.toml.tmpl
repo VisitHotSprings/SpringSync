@@ -1,0 +1,38 @@
+# @DATA@\springsync.toml : bootstrap only, NO SECRETS (SPEC 8.2, 11.5.2). Rendered once by install.ps1;
+# never overwritten by install or update. Everything operational (NAS address, schedule, alerts, pilot
+# list, group IDs) is edited in the admin GUI and stored in the database.
+# Secrets live DPAPI-protected in @DATA@\keys\*.dpapi (SPEC 11.5.4), never in this file.
+
+[app]
+product_name = "SpringSync"
+slug = "springsync"
+org_name = "VisitHotSprings"
+base_url = "@BASE_URL@"
+host_os = "windows"
+
+[entra]
+tenant_id = "@TENANT_ID@"
+client_id = "@CLIENT_ID@"
+credential_type = "certificate"
+cert_path = '@DATA@\keys\entra-app.crt'
+token_mode = "broker"
+allowed_upn_domain = "@UPN_DOMAIN@"
+# bootstrap Entra security group object IDs (the GUI can change them later)
+group_users = "@GROUP_USERS@"
+group_admins = "@GROUP_ADMINS@"
+group_auditors = "@GROUP_AUDITORS@"
+
+[google]
+# Optional (SPEC 4.3/4.4). Empty = Google not configured. The client SECRET goes in with
+# set-secret.ps1 -Name google-client.secret (DPAPI), never here.
+client_id = "@GOOGLE_CLIENT_ID@"
+allowed_domain = "@UPN_DOMAIN@"
+
+[paths]
+# Defaults are %ProgramData%\SpringSync\... and %ProgramFiles%\SpringSync\bin\rclone.exe.
+# Uncomment only to move something.
+# db_path = '@DATA@\db\springsync.db'
+
+[nas]
+nas_host = "@NAS_HOST@"
+nas_share = "@NAS_SHARE@"

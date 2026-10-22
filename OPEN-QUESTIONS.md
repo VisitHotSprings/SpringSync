@@ -241,3 +241,51 @@ Also not covered by local tests:
 - **§13 / §12.2:** T-G2 must pass on the Ubuntu test host before any real Google user is connected
   (docs/DEPLOY.md checklist).
 - **§14 (new):** bulk approve for the post-upgrade resyncs (§E.3), Reid's proposal, Mark to decide.
+
+## H. v0.10 Windows host: deviations and open questions (Dex)
+Built from SPEC §11.5 / §11.6. Each item is how it's built now; Reid / Mark to confirm or change.
+
+### H.1 Deviations from the spec
+1. **Python 3.13.17 embeddable, not the 3.12 installer.** python.org no longer ships Windows binaries for
+   3.12 security releases. The embeddable zip is the official python.org build, is checked by SHA-256 and
+   avoids a system-wide install (and antivirus-unfriendly bundlers). The app's tests run on 3.13 in CI.
+2. **Zip install, not `git clone` with a deploy key.** There is no org deploy key yet. The release zip is
+   built from `git archive` of the tag plus verified vendor files, with `SHA256SUMS.txt` inside and next to
+   it. `update.ps1 -Zip -Sha256` replaces "git fetch + checkout". A deploy-key pull can come later.
+3. **No venv.** The private Python gets packages with `pip --target` from the hashed
+   `requirements-windows.lock` (offline, `--require-hashes --only-binary=:all:`).
+4. **NAS: WNet API with the database-stored NAS logins, not Credential Manager / `cmdkey`.** `cmdkey` puts
+   the password on a command line, and svc-springsync is denied interactive logon, so it can't manage its
+   own vault. Not the rclone `smb` backend either: no hashes, `--backup-dir` can't span servers, and it
+   breaks the §9.8 behaviour match with Linux.
+5. **Service wrapper: pywin32, not WinSW.** It runs on the private Python, needs no extra exe from GitHub,
+   and handles pre-shutdown so a reboot drains running syncs.
+6. **Caddy service is `springsync-caddy`** (Caddy's own Windows service support via `sc.exe`), so it can't
+   clash with another Caddy on the PC. Logs go to `logs\caddy.log` (service stdout is discarded).
+7. **Timers live in the worker** (backup 02:30, maintenance 03:30 Central) instead of systemd timers / Task
+   Scheduler, so no scheduled task needs a stored password.
+8. **Per-run rclone configs are written to `ProgramData\SpringSync\run`** (ACL-locked, deleted after the
+   run). Windows has no tmpfs, so **BitLocker is required** (pre-flight warns without it).
+9. **On Windows the config backup covers only `springsync.toml` and the Caddyfile**; keys are DPAPI-bound to
+   the account and are recovered from escrow, not from the backup.
+
+### H.2 Open questions
+1. **§14.25 Option A vs B (error 1219).** Built: Option A works, but users on the same NAS server with
+   different logins run one after another, and a backup NAS on the same server with another login fails
+   fast. **Recommendation: Option B** (one service login on the UNAS Pro). T-W4 decides.
+2. **Plain HTTP for the lab?** The spec is HTTPS-only, so none was built. If Mark wants a lab run before
+   DNS-01 is ready, proposal: a lab-only `tls internal` Caddyfile plus a hosts-file entry, or use the site
+   from the PC itself (`127.0.0.1`). Needs Reid's OK; not built.
+3. **Windows Update window (§14.26).** Proposed only: Intune ring, active hours 06:00–22:00, restarts Sunday
+   03:00–05:00 CT (after the 02:30 backup and clear of the 03:30 maintenance). Margaret owns Intune.
+4. **Caddy for Windows** has to be built where Go modules can be downloaded
+   (`deploy/windows/build-caddy-windows.sh`), then its SHA-256 recorded. Not built here.
+5. **Code signing.** Scripts are ready for Authenticode (`Set-AuthenticodeSignature`). Does VHS want a
+   certificate (and who holds it)? Until then the guide covers SmartScreen and SHA-256 checks.
+6. **Ubuntu → Windows move (§11.6).** The guide covers a fresh Windows install. Moving the database from
+   the Ubuntu host needs the escrowed `data.key` (and `entra-app.key`) put in with
+   `set-secret.ps1 -FromFile` before the services start; steps are at the end of INSTALL-WINDOWS.md §15,
+   untested.
+7. **Not tested on real Windows:** T-W1 (1219), T-W2 (long paths / encoding), T-W3 (CTRL_BREAK stop),
+   T-W4 (A vs B), reboot during a run, DPAPI after a password change. The `windows` CI job runs the
+   Windows unit tests once the branch is pushed.

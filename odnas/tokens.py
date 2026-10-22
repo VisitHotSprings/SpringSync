@@ -108,7 +108,7 @@ def render_for(cfg: Config, provider: str, cred, uid: str, token: dict, token_ur
 def write_private(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:   # exact bytes on Windows too
         f.write(text)
 
 

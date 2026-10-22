@@ -18,7 +18,8 @@ and their **UniFi NAS home folder** in two-way sync, using one `rclone bisync` j
   Admins switch directions with a reason; the worker applies it between runs.
 - **Windows file-name rules** on every rclone command (`--local-encoding`), and Windows/Google preflight rules.
 
-> **Status: lab-only (v0.9.1).** Nothing has been deployed. The build spec is `../SPEC.md` (source of truth) and the
+> **Status: lab-only (v0.10.0).** Nothing has been deployed. Two hosts from one codebase: Ubuntu
+> (`docs/DEPLOY.md`) and Windows 11 Pro (`docs/INSTALL-WINDOWS.md`, `deploy/windows/`). The build spec is `../SPEC.md` (source of truth) and the
 > background research is `../research.md`. `OPEN-QUESTIONS.md` lists everything that blocks a pilot.
 
 The product name is not final. The Python package is deliberately neutral (`odnas`). The display name and the
@@ -213,7 +214,7 @@ sudo REPO_URL=git@github.com:<OWNER>/<REPO>.git TENANT_ID=... CLIENT_ID=... \
      GROUP_USERS=... GROUP_ADMINS=... GROUP_AUDITORS=... \
      SYNC_HOST=sync.hotsprings.org GCP_ACME_PROJECT=... ACME_ZONE=... \
      LAN_CIDRS="10.0.0.0/16" ADMIN_CIDR="10.0.10.0/24" LOG_READERS="walter" \
-     ./deploy/install.sh --version v0.9.1           # add --dry-run to see the plan first
+     ./deploy/install.sh --version v0.10.0           # add --dry-run to see the plan first
 ```
 `install.sh` is idempotent: every step checks state first, and it never overwrites keys, the DB, or settings.
 It handles:
